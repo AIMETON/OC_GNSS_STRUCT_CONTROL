@@ -4,7 +4,7 @@
 
 These rules apply to the whole repository. Narrower `AGENTS.md` files may strengthen but not weaken them.
 
-Canonical AIMETON-wide governance: `Dimar4713/aimeton-architecture/AGENTS.md`.
+Canonical AIMETON-wide governance: `AIMETON/aimeton-architecture/AGENTS.md`.
 
 ## Mission rule
 
@@ -12,7 +12,7 @@ Work is performed as an evidence-driven engineering mission, not as isolated cod
 
 Before substantial work read the current README/status/engineering-preview docs, active P0 issue, relevant scenarios/contracts, current PR/CI state and exact `main` SHA. For cross-repository work read every touched repository's root `AGENTS.md` before the first mutation.
 
-For runner/deployment/runtime infrastructure facts use `Dimar4713/aimeton-infrastructure`; for normative AIMETON principles use `Dimar4713/aimeton-architecture`.
+For runner/deployment/runtime infrastructure facts use `Dimar4713/aimeton-infrastructure`; for normative AIMETON principles use `AIMETON/aimeton-architecture`.
 
 ## 3×3 Reality Check
 
