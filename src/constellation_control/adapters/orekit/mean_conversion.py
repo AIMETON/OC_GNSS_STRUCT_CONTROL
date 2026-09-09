@@ -303,3 +303,77 @@ class OrekitGlonassAlmanacMeanConversionClient:
         if not metadata.get("almanac_epoch") or not metadata.get("glonass_target_epoch"):
             raise RuntimeError("GLONASS almanac conversion omitted epoch attestation")
         return result
+
+
+class RinexGlonassSatelliteMean(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    satellite_id: str
+    prn: int
+    frequency_channel: int
+    health_flags: int
+    ephemeris_epoch: str
+    ephemeris_age_s: float
+    mean_orbit: MeanOrbit
+    backend_metadata: dict[str, str]
+
+
+class RinexGlonassToMeanResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    satellites: tuple[RinexGlonassSatelliteMean, ...]
+    backend_metadata: dict[str, str]
+
+
+class OrekitRinexGlonassMeanConversionClient:
+    def __init__(self, base_url: str, timeout_s: float = 120.0) -> None:
+        self._url = base_url.rstrip("/") + "/v1/orbits/rinex-glonass-to-mean"
+        self._timeout_s = timeout_s
+
+    def convert(
+        self,
+        *,
+        source_name: str,
+        source_text: str,
+        frame: FrameName,
+        target_epoch: datetime,
+        target_time_scale: TimeScaleName,
+        max_ephemeris_age_s: float,
+        glonass_propagation_step_s: float,
+        spacecraft: SpacecraftModel,
+        force_model: ForceModelConfig,
+    ) -> RinexGlonassToMeanResult:
+        if force_model.gravity_model is None:
+            raise RuntimeError("RINEX GLONASS conversion requires explicit gravity authority")
+        fingerprint = force_model.fingerprint()
+        payload = {
+            "source_name": source_name,
+            "source_text": source_text,
+            "frame": frame.value,
+            "target_epoch": target_epoch.isoformat().replace("+00:00", "Z"),
+            "target_time_scale": target_time_scale.value,
+            "max_ephemeris_age_s": max_ephemeris_age_s,
+            "glonass_propagation_step_s": glonass_propagation_step_s,
+            "spacecraft": spacecraft.model_dump(mode="json"),
+            "force_model": force_model.model_dump(mode="json"),
+            "force_model_fingerprint": fingerprint,
+        }
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        request = Request(self._url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with open_orekit_url(request, self._timeout_s) as response:
+                raw = response.read().decode()
+        except HTTPError as error:
+            detail = error.read().decode(errors="replace")
+            raise RuntimeError(f"Orekit RINEX GLONASS HTTP {error.code}: {detail}") from error
+        except URLError as error:
+            raise RuntimeError(f"Orekit RINEX GLONASS connection failed: {error.reason}") from error
+        except TimeoutError as error:
+            raise RuntimeError(f"Orekit RINEX GLONASS exceeded {self._timeout_s:.0f} s") from error
+        result = RinexGlonassToMeanResult.model_validate(json.loads(raw))
+        if not result.satellites:
+            raise RuntimeError("Orekit RINEX GLONASS returned no satellites")
+        for item in result.satellites:
+            if item.mean_orbit.definition.force_model_fingerprint != fingerprint:
+                raise RuntimeError("RINEX GLONASS mean force-model fingerprint mismatch")
+            if item.backend_metadata.get("source_authority") != "IGS-BKG-RINEX-NAV":
+                raise RuntimeError("unexpected RINEX GLONASS source authority")
+        return result
