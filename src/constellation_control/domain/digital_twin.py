@@ -178,6 +178,7 @@ class ScenarioLineage(BaseModel):
         "propagated_state",
         "constellation_editor",
         "gravity_model_change",
+        "rinex_nav_import",
     ]
     random_seed: int | None = None
     source_type: Literal[
@@ -186,6 +187,7 @@ class ScenarioLineage(BaseModel):
         "gps_sem",
         "glonass_authority_v1",
         "mixed_gnss_almanac",
+        "rinex_nav",
     ] | None = None
     source_name: str | None = None
     source_sha256: str | None = None

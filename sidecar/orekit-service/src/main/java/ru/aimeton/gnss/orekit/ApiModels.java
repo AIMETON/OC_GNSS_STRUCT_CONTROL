@@ -153,6 +153,32 @@ final class ApiModels {
             ForceModel forceModel,
             String forceModelFingerprint) {}
 
+    record RinexGlonassToMeanRequest(
+            String sourceName,
+            String sourceText,
+            String frame,
+            String targetEpoch,
+            String targetTimeScale,
+            double maxEphemerisAgeS,
+            double glonassPropagationStepS,
+            SpacecraftModel spacecraft,
+            ForceModel forceModel,
+            String forceModelFingerprint) {}
+
+    record RinexGlonassSatelliteMean(
+            String satelliteId,
+            int prn,
+            int frequencyChannel,
+            int healthFlags,
+            String ephemerisEpoch,
+            double ephemerisAgeS,
+            MeanOrbit meanOrbit,
+            Map<String, String> backendMetadata) {}
+
+    record RinexGlonassToMeanResult(
+            List<RinexGlonassSatelliteMean> satellites,
+            Map<String, String> backendMetadata) {}
+
     record MeanConversionResult(
             MeanOrbit meanOrbit,
             Map<String, String> backendMetadata) {}
