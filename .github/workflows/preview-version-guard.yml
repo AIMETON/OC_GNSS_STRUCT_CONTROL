@@ -1,0 +1,60 @@
+name: preview-version-guard
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'preview/**'
+      - 'sidecar/**'
+      - 'scenarios/**'
+      - 'scripts/**'
+      - 'pyproject.toml'
+      - '.github/workflows/preview-release-package.yml'
+      - '.github/workflows/preview-version-guard.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  require-preview-version-bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require monotonically increasing Preview version
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          VERSION_RE = re.compile(r'__version__\s*=\s*["\'](\d+)\.(\d+)\.(\d+)["\']')
+
+          def parse(text: str) -> tuple[int, int, int]:
+              match = VERSION_RE.search(text)
+              if not match:
+                  raise SystemExit('canonical Preview version must be MAJOR.MINOR.PATCH')
+              return tuple(int(part) for part in match.groups())
+
+          head_text = Path('src/constellation_control/version.py').read_text(encoding='utf-8')
+          base_text = subprocess.check_output(
+              ['git', 'show', f"{os.environ['BASE_SHA']}:src/constellation_control/version.py"],
+              text=True,
+          )
+          head = parse(head_text)
+          base = parse(base_text)
+          if head <= base:
+              raise SystemExit(
+                  f'Preview version must increase for package-changing PRs: base={base}, head={head}'
+              )
+          print(f'Preview version bump verified: {base} -> {head}')
+          PY
