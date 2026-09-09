@@ -4,7 +4,7 @@ import gzip
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -101,7 +101,7 @@ def fetch_bkg_glonass_daily(
         "rinex_sha256": rinex_sha,
         "gzip_path": str(gzip_path),
         "rinex_path": str(rinex_path),
-        "cached_at_utc": datetime.now(timezone.utc).isoformat(),
+        "cached_at_utc": datetime.now(UTC).isoformat(),
     }
     if manifest_path.exists():
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
