@@ -10,6 +10,11 @@ from constellation_control.preview.consolidated_release_app import (
     create_preview_app as create_consolidated_preview_app,
     render_preview_page_for_test as render_consolidated_page,
 )
+from constellation_control.preview.glonass_rinex_runner import (
+    GLONASS_RINEX_CARD,
+    GLONASS_RINEX_SCRIPT,
+    install_glonass_rinex_runner_routes,
+)
 from constellation_control.preview.gravity_model_ui import (
     GRAVITY_MODEL_CARD,
     GRAVITY_MODEL_SCRIPT,
@@ -54,6 +59,7 @@ def render_preview_page_for_test() -> str:
     page = page.replace(
         "</section></main>",
         (
+            f"{GLONASS_RINEX_CARD}"
             f"{IAC_GLONASS_RUNNER_CARD}"
             f"{IAC_GLONASS_CONSTELLATION_CARD}"
             f"{NAVCEN_GPS_RUNNER_CARD}"
@@ -64,6 +70,7 @@ def render_preview_page_for_test() -> str:
     )
     page = page.replace(
         "bootstrap().catch(e=>setStatus(String(e),'danger'));",
+        f"{GLONASS_RINEX_SCRIPT}\n"
         f"{IAC_GLONASS_RUNNER_SCRIPT}\n"
         f"{IAC_GLONASS_CONSTELLATION_SCRIPT}\n"
         f"{NAVCEN_GPS_RUNNER_SCRIPT}\n"
@@ -73,6 +80,7 @@ def render_preview_page_for_test() -> str:
         "bootstrap=async function(){"
         "await gravityBootstrap();"
         "if(typeof syncGravityModel==='function')syncGravityModel();"
+        "if(typeof syncGlonassRinexTemplate==='function')syncGlonassRinexTemplate();"
         "if(typeof syncIacGlonassRunnerSatellites==='function')syncIacGlonassRunnerSatellites();"
         "if(typeof syncIacGloConstTemplate==='function')syncIacGloConstTemplate();"
         "if(typeof installIacGloIntakeBridge==='function')installIacGloIntakeBridge();"
@@ -101,6 +109,7 @@ def create_preview_app(scenario_root: Path = Path("scenarios"), output_root: Pat
     def health() -> dict[str, str]:
         return {"status": "ok", "preview": PREVIEW_VERSION}
 
+    install_glonass_rinex_runner_routes(app, scenario_root)
     install_iac_glonass_runner_routes(app, scenario_root)
     install_iac_glonass_constellation_routes(app, scenario_root)
     install_navcen_gps_runner_routes(app, scenario_root)
