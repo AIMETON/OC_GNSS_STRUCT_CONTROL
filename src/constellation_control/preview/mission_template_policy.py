@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 from fastapi import FastAPI
 
@@ -11,10 +12,9 @@ from constellation_control.preview.base_preview_shell import preview_catalog
 
 def mission_modelling_templates(scenario_root: Path) -> dict[str, object]:
     root = scenario_root.resolve()
+    names = cast(list[str], preview_catalog(root)["scenarios"])
     candidates: list[dict[str, object]] = []
-    for name in preview_catalog(root).get("scenarios", []):
-        if not isinstance(name, str):
-            continue
+    for name in names:
         try:
             scenario = load_scenario(root / name)
         except (ValueError, TypeError, OSError):
@@ -23,7 +23,6 @@ def mission_modelling_templates(scenario_root: Path) -> dict[str, object]:
             continue
         if scenario.force_model.mode not in {ForceMode.DESIGN, ForceMode.VALIDATION}:
             continue
-        mode_rank = 0 if scenario.force_model.mode == ForceMode.DESIGN else 1
         candidates.append(
             {
                 "scenario_name": name,
@@ -36,13 +35,15 @@ def mission_modelling_templates(scenario_root: Path) -> dict[str, object]:
                 "time_scale": scenario.time_scale.value,
                 "orekit_sidecar_url": scenario.orekit_sidecar_url,
                 "spacecraft_template_id": scenario.constellation.satellites[0].satellite_id,
-                "_rank": (mode_rank, name),
             }
         )
-    candidates.sort(key=lambda item: item["_rank"])
-    for item in candidates:
-        item.pop("_rank", None)
-    recommended = candidates[0]["scenario_name"] if candidates else None
+    candidates.sort(
+        key=lambda item: (
+            0 if item["force_mode"] == ForceMode.DESIGN.value else 1,
+            str(item["scenario_name"]),
+        )
+    )
+    recommended = str(candidates[0]["scenario_name"]) if candidates else None
     return {
         "recommended": recommended,
         "candidates": candidates,
