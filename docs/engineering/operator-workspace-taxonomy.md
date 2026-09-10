@@ -18,7 +18,7 @@ Contains only ways to create initial scenario state:
 - XLS/XLSX bulk spacecraft-state input;
 - spacecraft/correction catalog input.
 
-The normal IGS workflow asks only for start date and GNSS system. All source-specific low-level adapters are Expert tools.
+The normal IGS workflow is two-stage. Network intake asks only for start date and GNSS system and must not depend on the active ScenarioConfig or Orekit availability. Scenario construction is a separate step that requires an explicitly selected template scenario for force-model, frame/time-scale, integrator and spacecraft authority. All source-specific low-level adapters are Expert tools.
 
 ## Design
 Contains:
