@@ -29,6 +29,15 @@ def test_mission_workspace_exposes_all_three_aimeton_echelons() -> None:
     assert "||'assisted'" in OPERATOR_TABS_SCRIPT
 
 
+def test_global_active_configuration_exposes_selected_echelon() -> None:
+    assert "id=\"activeEchelon\"" in MISSION_TEMPLATE_POLICY_SCRIPT
+    assert "updateGlobalMissionEchelon" in MISSION_TEMPLATE_POLICY_SCRIPT
+    assert "missionBaseSetEchelon" in MISSION_TEMPLATE_POLICY_SCRIPT
+    assert "Ручной / Manual" in MISSION_TEMPLATE_POLICY_SCRIPT
+    assert "Полуавтоматический / Assisted" in MISSION_TEMPLATE_POLICY_SCRIPT
+    assert "Автоматический / Automatic" in MISSION_TEMPLATE_POLICY_SCRIPT
+
+
 def test_scenario_workspace_has_fast_creation_and_variant_groups() -> None:
     assert 'id="operatorMissionBaseline"' in OPERATOR_TABS_CARD
     assert 'id="operatorScenarioVariants"' in OPERATOR_TABS_CARD
@@ -78,6 +87,12 @@ def test_manual_does_not_invoke_automatic_profile_resolver() -> None:
     )[0]
     assert "resolveMissionModellingTemplate" not in manual
     assert "createIgsBaseline" not in manual
+
+
+def test_legacy_other_yaml_inputs_are_moved_to_expert() -> None:
+    assert "other.closest('.card')" in MISSION_TEMPLATE_POLICY_SCRIPT
+    assert "expert.appendChild(card)" in MISSION_TEMPLATE_POLICY_SCRIPT
+    assert "otherYamlInputsCard" in MISSION_TEMPLATE_POLICY_SCRIPT
 
 
 def test_preview_state_is_accessed_as_lexical_state_not_window_property() -> None:
