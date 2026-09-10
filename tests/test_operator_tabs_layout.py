@@ -64,8 +64,10 @@ def test_runtime_progress_is_only_in_results_workspace() -> None:
     assert "operatorMoveCard('runProgressCard','operatorTabScenarios')" not in OPERATOR_TABS_SCRIPT
 
 
-def test_auto_baseline_resolves_governed_profile_then_runs_composite() -> None:
-    assert "resolveMissionModellingTemplate(preferred)" in MISSION_TEMPLATE_POLICY_SCRIPT
+def test_auto_baseline_resolves_trusted_profile_then_runs_composite() -> None:
+    assert "resolveMissionModellingTemplate(preferred,system)" in MISSION_TEMPLATE_POLICY_SCRIPT
+    assert "modelling-templates?system=" in MISSION_TEMPLATE_POLICY_SCRIPT
+    assert "synthetic smoke profile автоматически не используется" in MISSION_TEMPLATE_POLICY_SCRIPT
     assert "if(mode==='manual')" in MISSION_TEMPLATE_POLICY_SCRIPT
     assert "if(mode==='assisted')" in MISSION_TEMPLATE_POLICY_SCRIPT
     assert "const ok=await createIgsBaseline();" in MISSION_TEMPLATE_POLICY_SCRIPT
@@ -77,7 +79,7 @@ def test_assisted_resolves_profile_but_requires_operator_confirmation() -> None:
     assisted = MISSION_TEMPLATE_POLICY_SCRIPT.split("if(mode==='assisted')", 1)[1].split(
         "missionRefreshNextStep('AUTO:", 1
     )[0]
-    assert "Предложен modelling profile" in assisted
+    assert "Предложен подтверждённый modelling profile" in assisted
     assert "createIgsBaseline" not in assisted
 
 
