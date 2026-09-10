@@ -26,7 +26,12 @@ OPERATOR_TABS_CARD = r"""
   <button type="button" data-tab="results" onclick="showOperatorTab('results')">Расчёт и результаты / Run & Results</button>
   <button type="button" data-tab="expert" onclick="showOperatorTab('expert')">Эксперт / Expert</button>
 </nav>
-<div id="operatorTabScenarios" class="operator-tab-pane" data-tab-pane="scenarios"></div>
+<div id="operatorTabScenarios" class="operator-tab-pane" data-tab-pane="scenarios">
+  <div class="operator-input-intro">
+    <h2>Сценарии / Scenarios</h2>
+    <p class="hint">Только выбор, обзор и изменение структуры ScenarioConfig. Источники данных, модели расчёта и результаты находятся в своих вкладках.</p>
+  </div>
+</div>
 <div id="operatorTabInputs" class="operator-tab-pane" data-tab-pane="inputs">
   <div class="operator-input-intro">
     <h2>Исходные данные сценария / Scenario source data</h2>
@@ -49,10 +54,30 @@ OPERATOR_TABS_CARD = r"""
     <p class="hint">XLS/workbook для пакетного задания параметров КА, массы, топлива и групповых данных.</p>
   </section>
 </div>
-<div id="operatorTabDesign" class="operator-tab-pane" data-tab-pane="design"></div>
-<div id="operatorTabRobustness" class="operator-tab-pane" data-tab-pane="robustness"></div>
-<div id="operatorTabResults" class="operator-tab-pane" data-tab-pane="results"></div>
-<div id="operatorTabExpert" class="operator-tab-pane" data-tab-pane="expert"></div>
+<div id="operatorTabDesign" class="operator-tab-pane" data-tab-pane="design">
+  <div class="operator-input-intro">
+    <h2>Проектирование / Design</h2>
+    <p class="hint">Модель движения, управление и design-пайплайн. Здесь нет импорта исходных данных и отчётов расчёта.</p>
+  </div>
+</div>
+<div id="operatorTabRobustness" class="operator-tab-pane" data-tab-pane="robustness">
+  <div class="operator-input-intro">
+    <h2>Робастность / Robustness</h2>
+    <p class="hint">Возмущения, Monte Carlo и robustness validation.</p>
+  </div>
+</div>
+<div id="operatorTabResults" class="operator-tab-pane" data-tab-pane="results">
+  <div class="operator-input-intro">
+    <h2>Расчёт и результаты / Run & Results</h2>
+    <p class="hint">Запуск, ход расчёта, продолжение завершённых расчётов, ресурсы и инженерные результаты.</p>
+  </div>
+</div>
+<div id="operatorTabExpert" class="operator-tab-pane" data-tab-pane="expert">
+  <div class="operator-input-intro">
+    <h2>Эксперт / Expert</h2>
+    <p class="hint">Полный YAML, normalized state, legacy/source-specific adapters и низкоуровневые диагностические формы.</p>
+  </div>
+</div>
 """
 
 OPERATOR_TABS_STYLE = r"""
@@ -108,9 +133,23 @@ function splitWorkflowCard(){
   }
   card.replaceWith(design,robustness);
 }
+function splitConstellationEditorLegacyGravity(){
+  const card=operatorById('constellationEditorCard');if(!card)return;
+  const children=Array.from(card.childNodes);
+  let legacy=false;
+  const expert=document.createElement('div');
+  expert.className='card workflow-split-card';
+  expert.id='legacyConstellationGravityCard';
+  for(const node of children){
+    if(node.nodeType===1&&node.tagName==='H3'&&String(node.textContent).includes('Модель гравитационного поля Земли'))legacy=true;
+    if(legacy)expert.appendChild(node);
+  }
+  if(expert.childNodes.length)card.after(expert);
+}
 function arrangeOperatorTabs(){
   const section=document.querySelector('main section');if(!section)return;
   splitWorkflowCard();
+  splitConstellationEditorLegacyGravity();
   ['operatorTabScenarios','operatorTabInputs','operatorTabDesign','operatorTabRobustness','operatorTabResults','operatorTabExpert'].forEach(id=>{const pane=operatorById(id);if(pane&&pane.parentElement!==section)section.appendChild(pane);});
 
   operatorAdoptCardByChild('title','scenarioSummaryCard');
@@ -120,18 +159,18 @@ function arrangeOperatorTabs(){
   operatorAdoptCardByChild('yaml','expertYamlCard');
   operatorAdoptCardByChild('normalized','normalizedScenarioCard');
 
-  ['scenarioSummaryCard','constellationSummaryCard','geometrySummaryCard','scenarioEditorCard','gravityModelCard','constellationEditorCard','perturbationCard','spacecraftCatalogCard','resourceStateCard'].forEach(id=>operatorMoveCard(id,'operatorTabScenarios'));
+  ['scenarioSummaryCard','constellationSummaryCard','geometrySummaryCard','constellationEditorCard'].forEach(id=>operatorMoveCard(id,'operatorTabScenarios'));
 
   ['igsConstellationCard'].forEach(id=>operatorMoveCard(id,'operatorInputOfficialSources'));
   ['galileoGscCard','iacGnssCard','glonassAlmanacCard','gnssAlmanacCard','noradCard','glonassRinexRunnerCard','iacGlonassRunnerCard','iacGlonassConstellationCard','navcenGpsRunnerCard','mixedGnssRunnerCard'].forEach(id=>operatorMoveCard(id,'operatorTabExpert'));
   ['osculatingCard'].forEach(id=>operatorMoveCard(id,'operatorInputManualState'));
   ['walkerCard'].forEach(id=>operatorMoveCard(id,'operatorInputSynthesis'));
-  ['workbookCard'].forEach(id=>operatorMoveCard(id,'operatorInputBulk'));
+  ['workbookImportCard','spacecraftCatalogCard'].forEach(id=>operatorMoveCard(id,'operatorInputBulk'));
 
-  ['designWorkflowCard','optimalOperationsCard'].forEach(id=>operatorMoveCard(id,'operatorTabDesign'));
-  ['robustnessWorkflowCard'].forEach(id=>operatorMoveCard(id,'operatorTabRobustness'));
-  ['operationsSummaryCard','runProgressCard','runPromotionCard','driftConsistencyCard'].forEach(id=>operatorMoveCard(id,'operatorTabResults'));
-  ['expertYamlCard','normalizedScenarioCard'].forEach(id=>operatorMoveCard(id,'operatorTabExpert'));
+  ['gravityModelCard','closedLoopCard','designWorkflowCard','optimalOperationsCard'].forEach(id=>operatorMoveCard(id,'operatorTabDesign'));
+  ['perturbationCard','robustnessWorkflowCard'].forEach(id=>operatorMoveCard(id,'operatorTabRobustness'));
+  ['operationsSummaryCard','runProgressCard','runPromotionCard','resourceStateCard','driftConsistencyCard'].forEach(id=>operatorMoveCard(id,'operatorTabResults'));
+  ['scenarioEditorCard','legacyConstellationGravityCard','expertYamlCard','normalizedScenarioCard'].forEach(id=>operatorMoveCard(id,'operatorTabExpert'));
 
   const active=localStorage.getItem('operator-tab')||'scenarios';showOperatorTab(active);
 }
