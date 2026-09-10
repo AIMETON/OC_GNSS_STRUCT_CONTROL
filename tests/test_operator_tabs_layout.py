@@ -2,6 +2,7 @@ from constellation_control.preview.gravity_release_app import (
     create_preview_app,
     render_preview_page_for_test,
 )
+from constellation_control.preview.mission_template_policy import MISSION_TEMPLATE_POLICY_SCRIPT
 from constellation_control.preview.operator_tabs import OPERATOR_TABS_CARD, OPERATOR_TABS_SCRIPT
 from constellation_control.preview.scenario_workspace import SCENARIO_VARIANT_SCRIPT
 
@@ -54,19 +55,29 @@ def test_runtime_progress_is_only_in_results_workspace() -> None:
     assert "operatorMoveCard('runProgressCard','operatorTabScenarios')" not in OPERATOR_TABS_SCRIPT
 
 
-def test_auto_baseline_uses_governed_composite_and_fails_closed() -> None:
-    assert "if(!selected){missionRefreshNextStep('AUTO остановлен" in OPERATOR_TABS_SCRIPT
-    assert "if(typeof createIgsBaseline!=='function')" in OPERATOR_TABS_SCRIPT
-    assert "const ok=await createIgsBaseline();" in OPERATOR_TABS_SCRIPT
-    assert "ok?'AUTO baseline готов." in OPERATOR_TABS_SCRIPT
-    assert "AUTO остановлен. Подробности" in OPERATOR_TABS_SCRIPT
+def test_auto_baseline_resolves_governed_profile_then_runs_composite() -> None:
+    assert "resolveMissionModellingTemplate(preferred)" in MISSION_TEMPLATE_POLICY_SCRIPT
+    assert "if(mode==='manual')" in MISSION_TEMPLATE_POLICY_SCRIPT
+    assert "if(mode==='assisted')" in MISSION_TEMPLATE_POLICY_SCRIPT
+    assert "const ok=await createIgsBaseline();" in MISSION_TEMPLATE_POLICY_SCRIPT
+    assert "ok?'AUTO baseline готов." in MISSION_TEMPLATE_POLICY_SCRIPT
+    assert "AUTO остановлен. Подробности" in MISSION_TEMPLATE_POLICY_SCRIPT
 
 
-def test_assisted_prefills_template_but_requires_operator_confirmation() -> None:
-    assert "if(mode!=='manual'&&typeof igsTemplateScenario!=='undefined'&&selected)" in OPERATOR_TABS_SCRIPT
-    assert "Полуавтоматический эшелон" in OPERATOR_TABS_SCRIPT
-    assisted = OPERATOR_TABS_SCRIPT.split("if(mode==='assisted')", 1)[1].split("if(!selected)", 1)[0]
+def test_assisted_resolves_profile_but_requires_operator_confirmation() -> None:
+    assisted = MISSION_TEMPLATE_POLICY_SCRIPT.split("if(mode==='assisted')", 1)[1].split(
+        "missionRefreshNextStep('AUTO:", 1
+    )[0]
+    assert "Предложен modelling profile" in assisted
     assert "createIgsBaseline" not in assisted
+
+
+def test_manual_does_not_invoke_automatic_profile_resolver() -> None:
+    manual = MISSION_TEMPLATE_POLICY_SCRIPT.split("if(mode==='manual')", 1)[1].split(
+        "let resolved;", 1
+    )[0]
+    assert "resolveMissionModellingTemplate" not in manual
+    assert "createIgsBaseline" not in manual
 
 
 def test_preview_state_is_accessed_as_lexical_state_not_window_property() -> None:
@@ -74,6 +85,8 @@ def test_preview_state_is_accessed_as_lexical_state_not_window_property() -> Non
     assert "window.scenario" not in OPERATOR_TABS_SCRIPT
     assert "window.current" not in SCENARIO_VARIANT_SCRIPT
     assert "window.scenario" not in SCENARIO_VARIANT_SCRIPT
+    assert "window.current" not in MISSION_TEMPLATE_POLICY_SCRIPT
+    assert "window.scenario" not in MISSION_TEMPLATE_POLICY_SCRIPT
     assert "typeof current!=='undefined'" in OPERATOR_TABS_SCRIPT
     assert "typeof current==='undefined'" in SCENARIO_VARIANT_SCRIPT
 
