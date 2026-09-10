@@ -179,6 +179,7 @@ class ScenarioLineage(BaseModel):
         "constellation_editor",
         "gravity_model_change",
         "rinex_nav_import",
+        "operator_scenario_variant",
     ]
     random_seed: int | None = None
     source_type: Literal[
