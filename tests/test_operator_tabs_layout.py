@@ -18,6 +18,6 @@ def test_operator_layout_uses_semantic_card_anchors_not_position_or_text_regex()
 
 
 def test_runtime_progress_is_never_part_of_input_workspace() -> None:
-    expected = "['operationsSummaryCard','runProgressCard','runPromotionCard','driftConsistencyCard'].forEach(id=>operatorMoveCard(id,'operatorTabResults'))"
+    expected = "['operationsSummaryCard','runProgressCard','runPromotionCard','resourceStateCard','driftConsistencyCard'].forEach(id=>operatorMoveCard(id,'operatorTabResults'))"
     assert expected in OPERATOR_TABS_SCRIPT
     assert "operatorMoveCard('runProgressCard','operatorTabInputs')" not in OPERATOR_TABS_SCRIPT
