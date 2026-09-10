@@ -20,6 +20,18 @@ class ScenarioVariantRequest(BaseModel):
     output_step_s: float = Field(gt=0.0)
 
 
+def _safe_source(root: Path, name: str) -> Path:
+    if not name or Path(name).name != name or not name.lower().endswith((".yaml", ".yml")):
+        raise ValueError("source scenario must be a .yaml/.yml file name without path components")
+    root = root.resolve()
+    source = (root / name).resolve()
+    if source.parent != root:
+        raise ValueError("invalid source scenario path")
+    if not source.is_file():
+        raise ValueError(f"source scenario does not exist: {name}")
+    return source
+
+
 def _safe_target(root: Path, name: str) -> Path:
     if not name or Path(name).name != name or not name.lower().endswith((".yaml", ".yml")):
         raise ValueError("target scenario must be a new .yaml/.yml file name without path components")
@@ -35,7 +47,7 @@ def _safe_target(root: Path, name: str) -> Path:
 
 def create_scenario_variant(root: Path, request: ScenarioVariantRequest) -> dict[str, object]:
     root = root.resolve()
-    source = load_scenario(root / request.source_scenario_name)
+    source = load_scenario(_safe_source(root, request.source_scenario_name))
     if request.new_scenario_id == source.scenario_id:
         raise ValueError("new scenario_id must differ from the parent scenario_id")
     if request.output_step_s > request.duration_s:
