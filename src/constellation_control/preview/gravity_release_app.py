@@ -35,6 +35,7 @@ from constellation_control.preview.iac_glonass_runner import (
     IAC_GLONASS_RUNNER_SCRIPT,
     install_iac_glonass_runner_routes,
 )
+from constellation_control.preview.mission_template_policy import install_mission_template_policy_routes
 from constellation_control.preview.mixed_gnss_runner import (
     MIXED_GNSS_RUNNER_CARD,
     MIXED_GNSS_RUNNER_SCRIPT,
@@ -126,6 +127,7 @@ def create_preview_app(scenario_root: Path = Path("scenarios"), output_root: Pat
         return {"status": "ok", "preview": PREVIEW_VERSION}
 
     install_igs_constellation_routes(app, scenario_root)
+    install_mission_template_policy_routes(app, scenario_root)
     install_glonass_rinex_runner_routes(app, scenario_root)
     install_iac_glonass_runner_routes(app, scenario_root)
     install_iac_glonass_constellation_routes(app, scenario_root)
