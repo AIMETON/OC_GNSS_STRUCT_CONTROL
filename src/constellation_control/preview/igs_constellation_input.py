@@ -38,12 +38,24 @@ class IgsConstellationRequest(IgsDataFetchRequest):
     template_scenario_name: str
 
 
-def _safe_target(root: Path, name: str) -> Path:
-    target = (root.resolve() / name).resolve()
-    if target.parent != root.resolve():
+def _safe_existing_scenario(root: Path, name: str) -> Path:
+    if not name or Path(name).name != name or not name.lower().endswith((".yaml", ".yml")):
+        raise ValueError("template scenario must be a .yaml/.yml file name without path components")
+    root = root.resolve()
+    source = (root / name).resolve()
+    if source.parent != root:
+        raise ValueError("invalid template scenario path")
+    if not source.is_file():
+        raise ValueError(f"template scenario does not exist: {name}")
+    return source
+
+
+def _safe_target_path(root: Path, name: str) -> Path:
+    root = root.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    target = (root / name).resolve()
+    if target.parent != root:
         raise ValueError("invalid target scenario path")
-    if target.exists():
-        raise ValueError(f"derived scenario already exists: {name}")
     return target
 
 
@@ -75,21 +87,112 @@ def fetch_igs_constellation_data(root: Path, request: IgsDataFetchRequest) -> di
     return _cache_result(cached, request)
 
 
+def _scenario_identity(source: ScenarioConfig, request: IgsConstellationRequest) -> tuple[str, str]:
+    slug = request.system.lower().replace(" ", "-")
+    mode = source.force_model.mode.value
+    degree = source.force_model.gravity_degree
+    order = source.force_model.gravity_order
+    authority_tag = source.config_hash()[:8]
+    scenario_id = (
+        f"igs-{slug}-{request.source_date.isoformat()}-{mode}-g{degree}x{order}-{authority_tag}"
+    )
+    return scenario_id, f"{scenario_id}.yaml"
+
+
+def _reusable_existing_baseline(
+    target: Path,
+    *,
+    source: ScenarioConfig,
+    request: IgsConstellationRequest,
+    cached: CachedRinexNav,
+) -> ScenarioConfig | None:
+    if not target.exists():
+        return None
+    existing = load_scenario(target)
+    lineage = None if existing.digital_twin is None else existing.digital_twin.lineage
+    expected_prefix = f"{request.system}:"
+    if (
+        lineage is not None
+        and lineage.source_type == "rinex_nav"
+        and lineage.source_sha256 == cached.source_sha256
+        and lineage.parent_config_hash == source.config_hash()
+        and (lineage.source_record_id or "").startswith(expected_prefix)
+        and existing.force_model.fingerprint() == source.force_model.fingerprint()
+    ):
+        return existing
+    raise ValueError(
+        f"baseline target already exists with different provenance or modelling authority: {target.name}"
+    )
+
+
+def _baseline_payload(
+    scenario: ScenarioConfig,
+    *,
+    request: IgsConstellationRequest,
+    cached: CachedRinexNav,
+    template_satellite_id: str,
+    scenario_name: str,
+    reused: bool,
+) -> dict[str, object]:
+    return {
+        "saved": not reused,
+        "reused": reused,
+        "runnable": True,
+        "scenario_name": scenario_name,
+        "scenario_id": scenario.scenario_id,
+        "system": request.system,
+        "source_date": request.source_date.isoformat(),
+        "target_epoch": scenario.epoch.isoformat(),
+        "satellite_count": len(scenario.constellation.satellites),
+        "source_url": cached.source_url,
+        "source_sha256": cached.source_sha256,
+        "rinex_sha256": cached.rinex_sha256,
+        "cached_rinex": str(cached.rinex_path),
+        "source_transport": cached.transport,
+        "template_scenario_name": request.template_scenario_name,
+        "template_satellite_id": template_satellite_id,
+        "max_ephemeris_age_s": DEFAULT_MAX_EPHEMERIS_AGE_S,
+        "glonass_propagation_step_s": (
+            DEFAULT_GLONASS_PROPAGATION_STEP_S if request.system == "GLONASS" else None
+        ),
+        "child_config_hash": scenario.config_hash(),
+    }
+
+
 def build_igs_constellation_scenario(root: Path, request: IgsConstellationRequest) -> dict[str, object]:
     if not request.template_scenario_name:
-        raise ValueError("select an explicit template scenario")
+        raise ValueError("select an explicit modelling authority scenario")
 
-    source = load_scenario(root / request.template_scenario_name)
+    root = root.resolve()
+    source = load_scenario(_safe_existing_scenario(root, request.template_scenario_name))
     if not source.constellation.satellites:
-        raise ValueError("template scenario contains no spacecraft template")
+        raise ValueError("modelling authority scenario contains no spacecraft template")
     if not source.orekit_sidecar_url:
-        raise ValueError("selected template scenario has no orekit_sidecar_url")
+        raise ValueError("selected modelling authority scenario has no orekit_sidecar_url")
 
     template = source.constellation.satellites[0]
     target_epoch = datetime.combine(request.source_date, time.min, tzinfo=UTC)
     cached = fetch_bkg_gnss_daily(request.source_date, request.system, _cache_root(root))
-    rinex_text = cached.rinex_path.read_text(encoding="ascii", errors="strict")
+    scenario_id, scenario_name = _scenario_identity(source, request)
+    target = _safe_target_path(root, scenario_name)
 
+    reusable = _reusable_existing_baseline(
+        target,
+        source=source,
+        request=request,
+        cached=cached,
+    )
+    if reusable is not None:
+        return _baseline_payload(
+            reusable,
+            request=request,
+            cached=cached,
+            template_satellite_id=template.satellite_id,
+            scenario_name=scenario_name,
+            reused=True,
+        )
+
+    rinex_text = cached.rinex_path.read_text(encoding="ascii", errors="strict")
     if request.system == "GLONASS":
         glonass_converted = OrekitRinexGlonassMeanConversionClient(source.orekit_sidecar_url).convert(
             source_name=cached.source_url,
@@ -131,11 +234,6 @@ def build_igs_constellation_scenario(root: Path, request: IgsConstellationReques
     if not satellites:
         raise ValueError(f"IGS RINEX contains no {request.system} spacecraft")
 
-    slug = request.system.lower().replace(" ", "-")
-    scenario_id = f"igs-{slug}-{request.source_date.isoformat()}"
-    scenario_name = f"{scenario_id}.yaml"
-    target = _safe_target(root, scenario_name)
-
     lineage = ScenarioLineage(
         parent_scenario_id=source.scenario_id,
         parent_config_hash=source.config_hash(),
@@ -171,34 +269,20 @@ def build_igs_constellation_scenario(root: Path, request: IgsConstellationReques
         yaml.safe_dump(child.model_dump(mode="json"), sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
-    return {
-        "saved": True,
-        "runnable": True,
-        "scenario_name": scenario_name,
-        "scenario_id": scenario_id,
-        "system": request.system,
-        "source_date": request.source_date.isoformat(),
-        "target_epoch": target_epoch.isoformat(),
-        "satellite_count": len(satellites),
-        "source_url": cached.source_url,
-        "source_sha256": cached.source_sha256,
-        "rinex_sha256": cached.rinex_sha256,
-        "cached_rinex": str(cached.rinex_path),
-        "source_transport": cached.transport,
-        "template_scenario_name": request.template_scenario_name,
-        "template_satellite_id": template.satellite_id,
-        "max_ephemeris_age_s": DEFAULT_MAX_EPHEMERIS_AGE_S,
-        "glonass_propagation_step_s": (
-            DEFAULT_GLONASS_PROPAGATION_STEP_S if request.system == "GLONASS" else None
-        ),
-        "child_config_hash": child.config_hash(),
-    }
+    return _baseline_payload(
+        child,
+        request=request,
+        cached=cached,
+        template_satellite_id=template.satellite_id,
+        scenario_name=scenario_name,
+        reused=False,
+    )
 
 
 IGS_CONSTELLATION_CARD = r"""
 <div class="card primary-input-card" id="igsConstellationCard">
   <h3>Создать baseline из реальной ОГ / Create baseline from real constellation</h3>
-  <p class="hint">Нормальный рабочий путь: выберите дату, систему и modelling template. Программа сама получает/использует cache RINEX NAV, сохраняет provenance и строит runnable ScenarioConfig. Технические этапы доступны ниже для ручного эшелона.</p>
+  <p class="hint">Нормальный рабочий путь: дата + система + подтверждённая физическая modelling authority. RINEX NAV, cache, transport, SHA-256 и provenance программа ведёт сама. В Assisted/Auto подходящая authority предлагается только из доверенной GNSS lineage; synthetic smoke не подставляется.</p>
   <div class="grid">
     <label>Дата baseline
       <input id="igsStartDate" type="date">
@@ -211,7 +295,7 @@ IGS_CONSTELLATION_CARD = r"""
         <option value="BeiDou">BeiDou / Compass</option>
       </select>
     </label>
-    <label>Modelling template
+    <label>Физическая модель / Modelling authority
       <select id="igsTemplateScenario"><option value="">— выберите —</option></select>
     </label>
   </div>
@@ -219,7 +303,7 @@ IGS_CONSTELLATION_CARD = r"""
   <div id="igsBaselineStatus" class="status"></div>
   <details>
     <summary>Ручной эшелон: разделить получение данных и построение ScenarioConfig</summary>
-    <p class="hint">Получение RINEX зависит только от даты и GNSS и не требует активного сценария/Orekit. Второй шаг использует явно выбранный modelling template как authority.</p>
+    <p class="hint">Получение RINEX зависит только от даты и GNSS и не требует активного сценария/Orekit. Второй шаг использует явно выбранную modelling authority.</p>
     <button onclick="fetchIgsConstellationData()">1. Скачать IGS RINEX</button>
     <div id="igsConstellationFetchStatus" class="status"></div>
     <button onclick="buildIgsConstellation()">2. Сформировать сценарий</button>
@@ -228,7 +312,7 @@ IGS_CONSTELLATION_CARD = r"""
   <pre id="igsConstellationResult"></pre>
   <details>
     <summary>Инженерная политика и provenance</summary>
-    <p class="hint">Сетевой intake выполняется cache-first. Modelling template задаёт force model, frame/time scale, integrator и физическую модель КА. Целевая эпоха: 00:00 UTC выбранной даты. Допустимый возраст ближайшего broadcast ephemeris: 7200 s. Для ГЛОНАСС шаг broadcast propagation: 60 s. Source URL, transport, SHA-256 и template записываются в lineage.</p>
+    <p class="hint">Сетевой intake выполняется cache-first. Modelling authority задаёт force model, frame/time scale, integrator и физическую модель КА. Целевая эпоха: 00:00 UTC выбранной даты. Допустимый возраст ближайшего broadcast ephemeris: 7200 s. Для ГЛОНАСС шаг broadcast propagation: 60 s. Source URL, transport, SHA-256 и authority записываются в lineage. Повторный идентичный запрос переиспользует уже созданный baseline; отличающаяся authority получает отдельную идентичность сценария.</p>
   </details>
 </div>
 """
@@ -259,7 +343,7 @@ async function buildIgsConstellation(){
   const date=igsStartDate.value;
   if(!date){igsConstellationStatus.textContent='Укажите стартовую дату';igsConstellationStatus.className='status danger';return false;}
   const template=igsTemplateScenario.value;
-  if(!template){igsConstellationStatus.textContent='Явно выберите modelling template';igsConstellationStatus.className='status danger';return false;}
+  if(!template){igsConstellationStatus.textContent='Явно выберите физическую modelling authority';igsConstellationStatus.className='status danger';return false;}
   const p={source_date:date,system:igsSystem.value,template_scenario_name:template};
   igsConstellationStatus.textContent='Локальный RINEX → Orekit → ScenarioConfig…';igsConstellationStatus.className='status';
   try{
@@ -270,13 +354,13 @@ async function buildIgsConstellation(){
     scenario.replaceChildren(...catalog.scenarios.map(x=>{const o=document.createElement('option');o.value=x;o.textContent=x;return o;}));
     syncIgsTemplateScenarios();
     scenario.value=d.scenario_name;await loadScenario();
-    igsConstellationStatus.textContent='RUNNABLE: '+d.scenario_name+'; '+d.system+'; КА='+d.satellite_count;
+    igsConstellationStatus.textContent=(d.reused?'REUSED: ':'RUNNABLE: ')+d.scenario_name+'; '+d.system+'; КА='+d.satellite_count;
     igsConstellationStatus.className='status ok';return true;
   }catch(e){igsConstellationStatus.textContent=String(e.message||e);igsConstellationStatus.className='status danger';return false;}
 }
 async function createIgsBaseline(){
   if(!igsStartDate.value){igsBaselineStatus.textContent='Укажите дату baseline';igsBaselineStatus.className='status danger';return false;}
-  if(!igsTemplateScenario.value){igsBaselineStatus.textContent='Выберите modelling template';igsBaselineStatus.className='status danger';return false;}
+  if(!igsTemplateScenario.value){igsBaselineStatus.textContent='Выберите физическую modelling authority';igsBaselineStatus.className='status danger';return false;}
   igsBaselineStatus.textContent='Создание baseline: source → cache → authority → runnable ScenarioConfig…';igsBaselineStatus.className='status';
   if(!(await fetchIgsConstellationData())){igsBaselineStatus.textContent='Baseline остановлен на получении исходных данных';igsBaselineStatus.className='status danger';return false;}
   if(!(await buildIgsConstellation())){igsBaselineStatus.textContent='Baseline остановлен при построении ScenarioConfig';igsBaselineStatus.className='status danger';return false;}
