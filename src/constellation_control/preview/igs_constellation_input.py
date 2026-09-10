@@ -58,7 +58,7 @@ def build_igs_constellation_scenario(root: Path, request: IgsConstellationReques
     rinex_text = cached.rinex_path.read_text(encoding="ascii", errors="strict")
 
     if request.system == "GLONASS":
-        converted = OrekitRinexGlonassMeanConversionClient(source.orekit_sidecar_url).convert(
+        glonass_converted = OrekitRinexGlonassMeanConversionClient(source.orekit_sidecar_url).convert(
             source_name=cached.source_url,
             source_text=rinex_text,
             frame=source.frame,
@@ -69,9 +69,9 @@ def build_igs_constellation_scenario(root: Path, request: IgsConstellationReques
             spacecraft=template.spacecraft,
             force_model=source.force_model,
         )
-        records = [(item.prn, item.mean_orbit) for item in converted.satellites]
+        records = [(item.prn, item.mean_orbit) for item in glonass_converted.satellites]
     else:
-        converted = OrekitRinexGnssMeanConversionClient(source.orekit_sidecar_url).convert(
+        gnss_converted = OrekitRinexGnssMeanConversionClient(source.orekit_sidecar_url).convert(
             system=request.system,
             source_name=cached.source_url,
             source_text=rinex_text,
@@ -82,7 +82,7 @@ def build_igs_constellation_scenario(root: Path, request: IgsConstellationReques
             spacecraft=template.spacecraft,
             force_model=source.force_model,
         )
-        records = [(item.prn, item.mean_orbit) for item in converted.satellites]
+        records = [(item.prn, item.mean_orbit) for item in gnss_converted.satellites]
 
     prefix = _SYSTEM_PREFIX[request.system]
     satellites = tuple(
