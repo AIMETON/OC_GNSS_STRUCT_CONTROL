@@ -9,11 +9,6 @@ from constellation_control.adapters.iac_gnss_tables import (
     fetch_iac_table,
     parse_iac_text,
 )
-from constellation_control.preview.galileo_gsc_input import (
-    GALILEO_GSC_CARD,
-    GALILEO_GSC_SCRIPT,
-    install_galileo_gsc_routes,
-)
 
 
 class IacOfflinePreviewRequest(BaseModel):
@@ -61,7 +56,7 @@ IAC_GNSS_CARD = r"""
   <div id="iacGnssStatus" class="status"></div>
   <pre id="iacGnssPreview"></pre>
 </div>
-""" + GALILEO_GSC_CARD
+"""
 
 IAC_GNSS_SCRIPT = r"""
 function iacStatus(text,kind=''){iacGnssStatus.textContent=text;iacGnssStatus.className='status '+kind;}
@@ -93,7 +88,7 @@ async function previewIacGnssOffline(){
   if(!r.ok){iacStatus(d.detail||'IAC offline parse failed','danger');return;}
   showIacTable(d);iacStatus('VALID OFFLINE: '+d.record_count+' rows','ok');
 }
-""" + GALILEO_GSC_SCRIPT
+"""
 
 
 def install_iac_gnss_routes(app: FastAPI) -> None:
@@ -115,5 +110,3 @@ def install_iac_gnss_routes(app: FastAPI) -> None:
             return _payload(table, filename=request.filename)
         except (ValueError, TypeError, OSError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    install_galileo_gsc_routes(app)
