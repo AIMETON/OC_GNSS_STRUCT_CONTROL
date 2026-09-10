@@ -36,7 +36,7 @@ final class RinexGnssMeanConversionEngine {
 
         Map<String, List<? extends AbstractNavigationMessage<?>>> messages = switch (request.system()) {
             case "GPS" -> preferLegacy(navigation.getGPSLegacyNavigationMessages(), navigation.getGPSCivilianNavigationMessages());
-            case "Galileo" -> navigation.getGalileoNavigationMessages();
+            case "Galileo" -> copyMap(navigation.getGalileoNavigationMessages());
             case "BeiDou" -> preferLegacy(
                     navigation.getBeidouLegacyNavigationMessages(),
                     navigation.getBeidouCivilianNavigationMessages());
@@ -116,6 +116,15 @@ final class RinexGnssMeanConversionEngine {
         metadata.put("target_time_scale", request.targetTimeScale());
         metadata.put("satellite_count", Integer.toString(satellites.size()));
         return new RinexGnssToMeanResult(satellites, metadata);
+    }
+
+    private static Map<String, List<? extends AbstractNavigationMessage<?>>> copyMap(
+            Map<String, ? extends List<? extends AbstractNavigationMessage<?>>> source) {
+        Map<String, List<? extends AbstractNavigationMessage<?>>> result = new LinkedHashMap<>();
+        for (Map.Entry<String, ? extends List<? extends AbstractNavigationMessage<?>>> entry : source.entrySet()) {
+            result.put(entry.getKey(), entry.getValue());
+        }
+        return result;
     }
 
     private static Map<String, List<? extends AbstractNavigationMessage<?>>> preferLegacy(
