@@ -14,7 +14,7 @@ def test_bkg_igs_system_suffixes() -> None:
     assert bkg_gnss_daily_url(day, "BeiDou").endswith("_CN.rnx.gz")
 
 
-def test_operator_inputs_show_two_stage_igs_workflow() -> None:
+def test_mission_workspace_exposes_two_stage_igs_baseline_workflow() -> None:
     page = render_preview_page_for_test()
     assert 'id="igsConstellationCard"' in page
     assert "/api/igs-constellation/fetch" in page
@@ -26,7 +26,7 @@ def test_operator_inputs_show_two_stage_igs_workflow() -> None:
     assert ">GPS<" in page
     assert ">Galileo<" in page
     assert "BeiDou / Compass" in page
-    assert "operatorInputOfficialSources" in page
+    assert "operatorMissionBaseline" in page
     assert "operatorTabExpert" in page
 
 
@@ -83,20 +83,21 @@ def test_low_level_source_cards_are_routed_to_expert() -> None:
     assert "mixedGnssRunnerCard" in page
 
 
-def test_operator_tab_routing_contract_is_role_based() -> None:
+def test_operator_workspace_contract_is_mission_based() -> None:
     page = render_preview_page_for_test()
-    # Scenarios: scenario overview/composition only.
-    assert "constellationEditorCard" in page
-    # Inputs: primary IGS plus explicit/manual/synthesis/bulk inputs.
+    # Mission: normal baseline creation from real constellation data.
+    assert "operatorMissionBaseline" in page
     assert "igsConstellationCard" in page
+    # Scenarios: overview, fast variants and alternative creation paths.
+    assert "constellationEditorCard" in page
+    assert "scenarioVariantCard" in page
     assert "osculatingCard" in page
     assert "walkerCard" in page
     assert "workbookImportCard" in page
-    # Design.
+    # Experiments combine model/design and robustness under one research workspace.
     assert "gravityModelCard" in page
     assert "closedLoopCard" in page
     assert "designWorkflowCard" in page or "workflowCard" in page
-    # Robustness.
     assert "perturbationCard" in page
     # Results.
     assert "runProgressCard" in page
