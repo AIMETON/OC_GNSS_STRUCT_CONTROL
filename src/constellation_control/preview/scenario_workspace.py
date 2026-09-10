@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import yaml
 from fastapi import FastAPI, HTTPException
@@ -75,7 +76,8 @@ def create_scenario_variant(root: Path, request: ScenarioVariantRequest) -> dict
         encoding="utf-8",
     )
     catalog = preview_catalog(root)
-    if target.name not in catalog.get("scenarios", []):
+    runnable = cast(list[str], catalog["scenarios"])
+    if target.name not in runnable:
         raise RuntimeError("derived scenario was saved but is not discoverable as runnable")
     return {
         "saved": True,
