@@ -14,14 +14,16 @@ def test_bkg_igs_system_suffixes() -> None:
     assert bkg_gnss_daily_url(day, "BeiDou").endswith("_CN.rnx.gz")
 
 
-def test_mission_workspace_exposes_two_stage_igs_baseline_workflow() -> None:
+def test_mission_workspace_exposes_one_click_baseline_and_manual_two_stage_workflow() -> None:
     page = render_preview_page_for_test()
     assert 'id="igsConstellationCard"' in page
     assert "/api/igs-constellation/fetch" in page
     assert "/api/igs-constellation/create" in page
+    assert "Создать baseline / Create runnable baseline" in page
+    assert "async function createIgsBaseline()" in page
     assert "1. Скачать IGS RINEX" in page
     assert "2. Сформировать сценарий" in page
-    assert "Базовая модель сценария — выбрать явно" in page
+    assert "Modelling template" in page
     assert "ГЛОНАСС" in page
     assert ">GPS<" in page
     assert ">Galileo<" in page
@@ -38,6 +40,15 @@ def test_igs_fetch_payload_has_no_active_scenario_dependency() -> None:
     assert "const p={source_date:date,system:igsSystem.value};" in fetch_script
     assert "scenario.value" not in fetch_script
     assert "template_scenario_name:template" in page
+
+
+def test_one_click_baseline_composes_existing_governed_stages() -> None:
+    page = render_preview_page_for_test()
+    baseline_script = page.split("async function createIgsBaseline(){", 1)[1].split('"""', 1)[0]
+    assert "await fetchIgsConstellationData()" in baseline_script
+    assert "await buildIgsConstellation()" in baseline_script
+    assert "return false" in baseline_script
+    assert "BASELINE READY" in baseline_script
 
 
 def test_igs_fetch_request_requires_no_scenario_or_orekit(tmp_path: Path, monkeypatch) -> None:
