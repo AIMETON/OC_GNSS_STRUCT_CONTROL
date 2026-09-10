@@ -2,6 +2,7 @@ from datetime import date
 from pathlib import Path
 
 from constellation_control.adapters.bkg_rinex_nav import CachedRinexNav, bkg_gnss_daily_url
+from constellation_control.application.run import load_scenario
 from constellation_control.preview import igs_constellation_input
 from constellation_control.preview.gravity_release_app import render_preview_page_for_test
 
@@ -23,7 +24,8 @@ def test_mission_workspace_exposes_one_click_baseline_and_manual_two_stage_workf
     assert "async function createIgsBaseline()" in page
     assert "1. Скачать IGS RINEX" in page
     assert "2. Сформировать сценарий" in page
-    assert "Modelling template" in page
+    assert "Физическая модель / Modelling authority" in page
+    assert "synthetic smoke" in page
     assert "ГЛОНАСС" in page
     assert ">GPS<" in page
     assert ">Galileo<" in page
@@ -44,11 +46,12 @@ def test_igs_fetch_payload_has_no_active_scenario_dependency() -> None:
 
 def test_one_click_baseline_composes_existing_governed_stages() -> None:
     page = render_preview_page_for_test()
-    baseline_script = page.split("async function createIgsBaseline(){", 1)[1].split('"""', 1)[0]
+    baseline_script = page.split("async function createIgsBaseline(){", 1)[1]
     assert "await fetchIgsConstellationData()" in baseline_script
     assert "await buildIgsConstellation()" in baseline_script
     assert "return false" in baseline_script
     assert "BASELINE READY" in baseline_script
+    assert "d.reused?'REUSED: '" in page
 
 
 def test_igs_fetch_request_requires_no_scenario_or_orekit(tmp_path: Path, monkeypatch) -> None:
@@ -86,6 +89,30 @@ def test_igs_fetch_request_requires_no_scenario_or_orekit(tmp_path: Path, monkey
     assert result["transport"] == "cache"
 
 
+def test_igs_template_path_is_confined_to_scenario_root(tmp_path: Path) -> None:
+    scenario_root = tmp_path / "scenarios"
+    scenario_root.mkdir()
+    try:
+        igs_constellation_input._safe_existing_scenario(scenario_root, "../outside.yaml")
+    except ValueError as exc:
+        assert "without path components" in str(exc)
+    else:
+        raise AssertionError("template path escape must be rejected")
+
+
+def test_baseline_identity_includes_modelling_authority_hash() -> None:
+    source = load_scenario(Path(__file__).parents[1] / "scenarios" / "orekit_design_smoke.yaml")
+    request = igs_constellation_input.IgsConstellationRequest(
+        source_date=date(2026, 9, 10),
+        system="GLONASS",
+        template_scenario_name="orekit_design_smoke.yaml",
+    )
+    scenario_id, scenario_name = igs_constellation_input._scenario_identity(source, request)
+    assert "design-g8x8" in scenario_id
+    assert source.config_hash()[:8] in scenario_id
+    assert scenario_name == scenario_id + ".yaml"
+
+
 def test_low_level_source_cards_are_routed_to_expert() -> None:
     page = render_preview_page_for_test()
     assert "glonassRinexRunnerCard" in page
@@ -96,26 +123,21 @@ def test_low_level_source_cards_are_routed_to_expert() -> None:
 
 def test_operator_workspace_contract_is_mission_based() -> None:
     page = render_preview_page_for_test()
-    # Mission: normal baseline creation from real constellation data.
     assert "operatorMissionBaseline" in page
     assert "igsConstellationCard" in page
-    # Scenarios: overview, fast variants and alternative creation paths.
     assert "constellationEditorCard" in page
     assert "scenarioVariantCard" in page
     assert "osculatingCard" in page
     assert "walkerCard" in page
     assert "workbookImportCard" in page
-    # Experiments combine model/design and robustness under one research workspace.
     assert "gravityModelCard" in page
     assert "closedLoopCard" in page
     assert "designWorkflowCard" in page or "workflowCard" in page
     assert "perturbationCard" in page
-    # Results.
     assert "runProgressCard" in page
     assert "runPromotionCard" in page
     assert "resourceStateCard" in page
     assert "driftConsistencyCard" in page
-    # Expert-only low-level and YAML tools remain available.
     assert "scenarioEditorCard" in page
     assert "galileoGscCard" in page
     assert "iacGnssCard" in page
