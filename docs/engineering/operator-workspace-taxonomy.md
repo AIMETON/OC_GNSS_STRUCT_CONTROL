@@ -11,13 +11,13 @@ The normal research lifecycle is:
 All workspaces operate on the same ScenarioConfig, lineage, provenance and run model. The three echelons are execution policies, not separate applications.
 
 ### Manual
-The operator explicitly chooses every engineering-significant source, template, parameter and action. No hidden substitutions are allowed. Expert tools remain available for raw YAML, source-specific adapters and diagnostics.
+The operator explicitly chooses every engineering-significant source, physical modelling authority, parameter and action. No hidden substitutions are allowed. Manual is also the only echelon allowed to establish a new physical spacecraft/modelling authority when no previously trusted profile exists. Expert tools remain available for raw YAML, source-specific adapters and diagnostics.
 
 ### Assisted
-This is the recommended default. The application may propose or prefill safe values and the next action, but the operator confirms engineering-significant transitions. Provenance and modelling authority remain visible.
+This is the recommended default. The application may propose or prefill safe values and the next action, but the operator confirms engineering-significant transitions. Provenance and modelling authority remain visible. Assisted may recommend only an authority that is already traceable to trusted GNSS source lineage for the requested constellation.
 
 ### Automatic
-The application may execute only governed, unambiguous steps already permitted by policy. It must preserve full provenance and stop fail-closed on missing authority, incompatible inputs or ambiguity. The operator can always descend from Automatic to Assisted or Manual without changing the underlying mission state.
+The application may execute only governed, unambiguous steps already permitted by policy. It must preserve full provenance and stop fail-closed on missing authority, incompatible inputs or ambiguity. Synthetic smoke/test profiles are never promoted automatically merely because they contain Orekit or DESIGN settings. The operator can always descend from Automatic to Assisted or Manual without changing the underlying mission state.
 
 ## Mission
 The normal entry point for modelling and research.
@@ -29,7 +29,16 @@ Contains:
 - one primary path to create a baseline from real constellation data;
 - next recommended action.
 
-The normal real-constellation baseline uses the unified IGS/BKG RINEX NAV intake. Network acquisition asks only for date and GNSS system and must not depend on the active ScenarioConfig or Orekit. Scenario construction is separate and uses an explicit modelling authority. In Automatic mode the already active ScenarioConfig may be used as that authority only because the operator selected the automatic policy; incompatibility must stop the chain.
+The normal real-constellation baseline uses the unified IGS/BKG RINEX NAV intake. Network acquisition asks only for date and GNSS system and must not depend on the active ScenarioConfig or Orekit. Scenario construction is separate and uses explicit physical modelling authority.
+
+For Assisted/Automatic baseline creation, the authority resolver is constellation-specific and fail-closed:
+1. use the active ScenarioConfig if it is an eligible DESIGN/VALIDATION scenario with Orekit, spacecraft parameters and traceable RINEX GNSS lineage for the requested constellation;
+2. otherwise use another eligible trusted scenario for the same constellation;
+3. otherwise stop and require Manual establishment/selection of physical authority.
+
+A GLONASS-derived spacecraft authority must never be silently reused for GPS/Galileo/BeiDou. A synthetic smoke scenario must never become an automatic physical authority simply because it is runnable.
+
+Baseline scenario identity includes source system/date plus the modelling authority's force-model mode, gravity degree/order and parent config-hash tag. Therefore the same source epoch can coexist under different physical/model authorities. An identical repeat request is idempotent and may reuse an existing matching baseline only when provenance, source SHA-256, parent config hash and force-model fingerprint agree.
 
 Source-specific low-level adapters do not belong in Mission.
 
@@ -58,7 +67,7 @@ Contains:
 - constellation perturbations;
 - robustness workflow / Monte Carlo validation.
 
-The long-term interaction model is baseline -> parameter variants/sweep -> governed batch execution -> comparison.
+The target interaction model is baseline -> parameter variants/sweep -> governed batch execution -> comparison.
 
 ## Results
 Contains:
@@ -75,6 +84,7 @@ Results should lead directly to the next variant or experiment rather than termi
 Contains:
 - full ScenarioConfig YAML editor;
 - normalized/raw representations;
+- legacy `Other YAML inputs` selector;
 - source-specific legacy/diagnostic adapters (IAC, NAVCEN, GSC, YUMA/SEM, TLE/OMM);
 - legacy embedded gravity editor retained only for compatibility;
 - transport/source diagnostics and manual authority tools.
