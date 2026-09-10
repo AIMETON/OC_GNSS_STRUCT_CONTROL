@@ -35,7 +35,10 @@ from constellation_control.preview.iac_glonass_runner import (
     IAC_GLONASS_RUNNER_SCRIPT,
     install_iac_glonass_runner_routes,
 )
-from constellation_control.preview.mission_template_policy import install_mission_template_policy_routes
+from constellation_control.preview.mission_template_policy import (
+    MISSION_TEMPLATE_POLICY_SCRIPT,
+    install_mission_template_policy_routes,
+)
 from constellation_control.preview.mixed_gnss_runner import (
     MIXED_GNSS_RUNNER_CARD,
     MIXED_GNSS_RUNNER_SCRIPT,
@@ -105,6 +108,7 @@ def render_preview_page_for_test() -> str:
         "if(typeof syncMixedGnssTemplateSatellites==='function')syncMixedGnssTemplateSatellites();"
         "};\n"
         f"{OPERATOR_TABS_SCRIPT}\n"
+        f"{MISSION_TEMPLATE_POLICY_SCRIPT}\n"
         "bootstrap().catch(e=>setStatus(String(e),'danger'));",
         1,
     )
