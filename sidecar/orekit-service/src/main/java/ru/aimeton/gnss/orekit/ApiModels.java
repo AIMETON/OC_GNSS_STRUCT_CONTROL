@@ -179,6 +179,30 @@ final class ApiModels {
             List<RinexGlonassSatelliteMean> satellites,
             Map<String, String> backendMetadata) {}
 
+    record RinexGnssToMeanRequest(
+            String system,
+            String sourceName,
+            String sourceText,
+            String frame,
+            String targetEpoch,
+            String targetTimeScale,
+            double maxEphemerisAgeS,
+            SpacecraftModel spacecraft,
+            ForceModel forceModel,
+            String forceModelFingerprint) {}
+
+    record RinexGnssSatelliteMean(
+            String satelliteId,
+            int prn,
+            String ephemerisEpoch,
+            double ephemerisAgeS,
+            MeanOrbit meanOrbit,
+            Map<String, String> backendMetadata) {}
+
+    record RinexGnssToMeanResult(
+            List<RinexGnssSatelliteMean> satellites,
+            Map<String, String> backendMetadata) {}
+
     record MeanConversionResult(
             MeanOrbit meanOrbit,
             Map<String, String> backendMetadata) {}
