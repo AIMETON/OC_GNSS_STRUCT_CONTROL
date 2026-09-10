@@ -2,33 +2,11 @@ from __future__ import annotations
 
 import gzip
 from datetime import date
-from io import BytesIO
 from pathlib import Path
 
 from constellation_control.adapters import bkg_rinex_nav
+from constellation_control.adapters.reviewed_http_fetch import ReviewedHttpResponse
 from constellation_control.preview.gravity_release_app import render_preview_page_for_test
-
-
-class _Headers:
-    def get(self, name: str, default=None):
-        if name.lower() == "content-type":
-            return "application/gzip"
-        return default
-
-
-class _Response:
-    def __init__(self, payload: bytes):
-        self._payload = BytesIO(payload)
-        self.headers = _Headers()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return False
-
-    def read(self, size: int = -1) -> bytes:
-        return self._payload.read(size)
 
 
 def _rinex_nav() -> bytes:
@@ -45,7 +23,18 @@ def test_bkg_glonass_url_uses_rinex_rn_daily_contract() -> None:
 
 def test_bkg_glonass_download_is_cached_with_hashes(tmp_path: Path, monkeypatch) -> None:
     payload = gzip.compress(_rinex_nav())
-    monkeypatch.setattr(bkg_rinex_nav, "urlopen", lambda request, timeout: _Response(payload))
+    calls = 0
+
+    def fake_fetch(url: str, *, timeout_s: float):
+        nonlocal calls
+        calls += 1
+        return ReviewedHttpResponse(
+            raw=payload,
+            content_type="application/gzip",
+            transport="urllib",
+        )
+
+    monkeypatch.setattr(bkg_rinex_nav, "fetch_reviewed_url", fake_fetch)
 
     cached = bkg_rinex_nav.fetch_bkg_glonass_daily(date(2026, 9, 9), tmp_path)
 
@@ -54,6 +43,18 @@ def test_bkg_glonass_download_is_cached_with_hashes(tmp_path: Path, monkeypatch)
     assert cached.manifest_path.is_file()
     assert len(cached.source_sha256) == 64
     assert len(cached.rinex_sha256) == 64
+    assert cached.transport == "urllib"
+    assert calls == 1
+
+    def network_must_not_be_called(url: str, *, timeout_s: float):
+        raise AssertionError("valid immutable cache must be used before network access")
+
+    monkeypatch.setattr(bkg_rinex_nav, "fetch_reviewed_url", network_must_not_be_called)
+    cached_again = bkg_rinex_nav.fetch_bkg_glonass_daily(date(2026, 9, 9), tmp_path)
+
+    assert cached_again.source_sha256 == cached.source_sha256
+    assert cached_again.rinex_sha256 == cached.rinex_sha256
+    assert cached_again.transport == "cache"
 
 
 def test_preview_exposes_glonass_rinex_runner() -> None:
