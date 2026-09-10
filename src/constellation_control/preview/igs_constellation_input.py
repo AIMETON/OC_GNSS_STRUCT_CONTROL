@@ -197,10 +197,10 @@ def build_igs_constellation_scenario(root: Path, request: IgsConstellationReques
 
 IGS_CONSTELLATION_CARD = r"""
 <div class="card primary-input-card" id="igsConstellationCard">
-  <h3>Источник орбитальной группировки</h3>
-  <p class="hint">Два независимых этапа: сначала загрузите RINEX NAV из IGS — для этого не нужен активный сценарий и Orekit. Затем, когда данные уже в локальном immutable-cache, явно выберите базовую модель и сформируйте runnable ScenarioConfig через Orekit.</p>
+  <h3>Создать baseline из реальной ОГ / Create baseline from real constellation</h3>
+  <p class="hint">Нормальный рабочий путь: выберите дату, систему и modelling template. Программа сама получает/использует cache RINEX NAV, сохраняет provenance и строит runnable ScenarioConfig. Технические этапы доступны ниже для ручного эшелона.</p>
   <div class="grid">
-    <label>Стартовая дата
+    <label>Дата baseline
       <input id="igsStartDate" type="date">
     </label>
     <label>Система
@@ -211,20 +211,24 @@ IGS_CONSTELLATION_CARD = r"""
         <option value="BeiDou">BeiDou / Compass</option>
       </select>
     </label>
-  </div>
-  <button onclick="fetchIgsConstellationData()">1. Скачать IGS RINEX</button>
-  <div id="igsConstellationFetchStatus" class="status"></div>
-  <div class="grid">
-    <label>Базовая модель сценария — выбрать явно
+    <label>Modelling template
       <select id="igsTemplateScenario"><option value="">— выберите —</option></select>
     </label>
   </div>
-  <button onclick="buildIgsConstellation()">2. Сформировать сценарий</button>
-  <div id="igsConstellationStatus" class="status"></div>
+  <button onclick="createIgsBaseline()">Создать baseline / Create runnable baseline</button>
+  <div id="igsBaselineStatus" class="status"></div>
+  <details>
+    <summary>Ручной эшелон: разделить получение данных и построение ScenarioConfig</summary>
+    <p class="hint">Получение RINEX зависит только от даты и GNSS и не требует активного сценария/Orekit. Второй шаг использует явно выбранный modelling template как authority.</p>
+    <button onclick="fetchIgsConstellationData()">1. Скачать IGS RINEX</button>
+    <div id="igsConstellationFetchStatus" class="status"></div>
+    <button onclick="buildIgsConstellation()">2. Сформировать сценарий</button>
+    <div id="igsConstellationStatus" class="status"></div>
+  </details>
   <pre id="igsConstellationResult"></pre>
   <details>
-    <summary>Используемая инженерная политика</summary>
-    <p class="hint">Сетевой intake зависит только от даты и GNSS. Он выполняется cache-first и не требует Orekit. При формировании ScenarioConfig базовая модель выбирается явно и задаёт force model, frame/time scale, integrator и физическую модель КА. Целевая эпоха: 00:00 UTC выбранной даты. Допустимый возраст ближайшего broadcast ephemeris: 7200 s. Для ГЛОНАСС шаг broadcast propagation: 60 s. Все источники и выбранная базовая модель записываются в lineage.</p>
+    <summary>Инженерная политика и provenance</summary>
+    <p class="hint">Сетевой intake выполняется cache-first. Modelling template задаёт force model, frame/time scale, integrator и физическую модель КА. Целевая эпоха: 00:00 UTC выбранной даты. Допустимый возраст ближайшего broadcast ephemeris: 7200 s. Для ГЛОНАСС шаг broadcast propagation: 60 s. Source URL, transport, SHA-256 и template записываются в lineage.</p>
   </details>
 </div>
 """
@@ -240,7 +244,7 @@ function syncIgsTemplateScenarios(){
 }
 async function fetchIgsConstellationData(){
   const date=igsStartDate.value;
-  if(!date){igsConstellationFetchStatus.textContent='Укажите стартовую дату';igsConstellationFetchStatus.className='status danger';return;}
+  if(!date){igsConstellationFetchStatus.textContent='Укажите стартовую дату';igsConstellationFetchStatus.className='status danger';return false;}
   const p={source_date:date,system:igsSystem.value};
   igsConstellationFetchStatus.textContent='IGS/BKG → RINEX NAV → локальный cache…';igsConstellationFetchStatus.className='status';
   try{
@@ -248,14 +252,14 @@ async function fetchIgsConstellationData(){
     const d=await r.json();if(!r.ok)throw new Error(d.detail||'IGS data fetch failed');
     igsConstellationResult.textContent=JSON.stringify(d,null,2);
     igsConstellationFetchStatus.textContent='DATA READY: '+d.source_filename+'; transport='+d.transport;
-    igsConstellationFetchStatus.className='status ok';
-  }catch(e){igsConstellationFetchStatus.textContent=String(e.message||e);igsConstellationFetchStatus.className='status danger';}
+    igsConstellationFetchStatus.className='status ok';return true;
+  }catch(e){igsConstellationFetchStatus.textContent=String(e.message||e);igsConstellationFetchStatus.className='status danger';return false;}
 }
 async function buildIgsConstellation(){
   const date=igsStartDate.value;
-  if(!date){igsConstellationStatus.textContent='Укажите стартовую дату';igsConstellationStatus.className='status danger';return;}
+  if(!date){igsConstellationStatus.textContent='Укажите стартовую дату';igsConstellationStatus.className='status danger';return false;}
   const template=igsTemplateScenario.value;
-  if(!template){igsConstellationStatus.textContent='Явно выберите базовую модель сценария';igsConstellationStatus.className='status danger';return;}
+  if(!template){igsConstellationStatus.textContent='Явно выберите modelling template';igsConstellationStatus.className='status danger';return false;}
   const p={source_date:date,system:igsSystem.value,template_scenario_name:template};
   igsConstellationStatus.textContent='Локальный RINEX → Orekit → ScenarioConfig…';igsConstellationStatus.className='status';
   try{
@@ -267,8 +271,16 @@ async function buildIgsConstellation(){
     syncIgsTemplateScenarios();
     scenario.value=d.scenario_name;await loadScenario();
     igsConstellationStatus.textContent='RUNNABLE: '+d.scenario_name+'; '+d.system+'; КА='+d.satellite_count;
-    igsConstellationStatus.className='status ok';
-  }catch(e){igsConstellationStatus.textContent=String(e.message||e);igsConstellationStatus.className='status danger';}
+    igsConstellationStatus.className='status ok';return true;
+  }catch(e){igsConstellationStatus.textContent=String(e.message||e);igsConstellationStatus.className='status danger';return false;}
+}
+async function createIgsBaseline(){
+  if(!igsStartDate.value){igsBaselineStatus.textContent='Укажите дату baseline';igsBaselineStatus.className='status danger';return false;}
+  if(!igsTemplateScenario.value){igsBaselineStatus.textContent='Выберите modelling template';igsBaselineStatus.className='status danger';return false;}
+  igsBaselineStatus.textContent='Создание baseline: source → cache → authority → runnable ScenarioConfig…';igsBaselineStatus.className='status';
+  if(!(await fetchIgsConstellationData())){igsBaselineStatus.textContent='Baseline остановлен на получении исходных данных';igsBaselineStatus.className='status danger';return false;}
+  if(!(await buildIgsConstellation())){igsBaselineStatus.textContent='Baseline остановлен при построении ScenarioConfig';igsBaselineStatus.className='status danger';return false;}
+  igsBaselineStatus.textContent='BASELINE READY: '+scenario.value;igsBaselineStatus.className='status ok';return true;
 }
 """
 
