@@ -15,9 +15,12 @@ def test_packaged_operator_surface_has_tabs_and_active_run_identity() -> None:
     assert 'id="activeRobustnessConfig"' in page
     assert 'id="activeFingerprint"' in page
 
-    for tab in ("scenarios", "inputs", "design", "robustness", "results", "expert"):
+    for tab in ("mission", "scenarios", "experiments", "results", "expert"):
         assert f'data-tab="{tab}"' in page
         assert f'data-tab-pane="{tab}"' in page
+
+    for retired_tab in ("inputs", "design", "robustness"):
+        assert f'data-tab="{retired_tab}"' not in page
 
     assert "splitWorkflowCard()" in page
     assert "DESIGN: screening=" in page
