@@ -30,3 +30,32 @@ def test_low_level_source_cards_are_routed_to_expert() -> None:
     assert "iacGlonassRunnerCard" in page
     assert "navcenGpsRunnerCard" in page
     assert "mixedGnssRunnerCard" in page
+
+
+
+def test_operator_tab_routing_contract_is_role_based() -> None:
+    page = render_preview_page_for_test()
+    # Scenarios: scenario overview/composition only.
+    assert "constellationEditorCard" in page
+    # Inputs: primary IGS plus explicit/manual/synthesis/bulk inputs.
+    assert "igsConstellationCard" in page
+    assert "osculatingCard" in page
+    assert "walkerCard" in page
+    assert "workbookImportCard" in page
+    # Design.
+    assert "gravityModelCard" in page
+    assert "closedLoopCard" in page
+    assert "designWorkflowCard" in page or "workflowCard" in page
+    # Robustness.
+    assert "perturbationCard" in page
+    # Results.
+    assert "runProgressCard" in page
+    assert "runPromotionCard" in page
+    assert "resourceStateCard" in page
+    assert "driftConsistencyCard" in page
+    # Expert-only low-level and YAML tools remain available.
+    assert "scenarioEditorCard" in page
+    assert "galileoGscCard" in page
+    assert "iacGnssCard" in page
+    assert "gnssAlmanacCard" in page
+    assert "noradCard" in page
