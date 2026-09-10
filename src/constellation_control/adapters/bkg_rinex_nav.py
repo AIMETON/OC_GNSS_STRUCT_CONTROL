@@ -50,7 +50,7 @@ def fetch_bkg_glonass_daily(
 ) -> CachedRinexNav:
     if timeout_s <= 0.0:
         raise ValueError("timeout_s must be positive")
-    url = bkg_glonass_daily_url(day)
+    url = bkg_gnss_daily_url(day, system)
     filename = url.rsplit("/", 1)[-1]
     doy = day.timetuple().tm_yday
     directory = cache_root.resolve() / "igs-bkg" / "brdc" / f"{day.year:04d}" / f"{doy:03d}"
@@ -59,13 +59,13 @@ def fetch_bkg_glonass_daily(
     rinex_path = directory / filename.removesuffix(".gz")
     manifest_path = directory / (filename + ".manifest.json")
 
-    request = Request(url, headers={"User-Agent": "OC-GNSS-STRUCT-CONTROL/0.2.9"})
+    request = Request(url, headers={"User-Agent": "OC-GNSS-STRUCT-CONTROL/0.2.10"})
     try:
         with urlopen(request, timeout=timeout_s) as response:  # noqa: S310 - fixed reviewed HTTPS origin
             content_type = (response.headers.get("Content-Type") or "").lower()
             compressed = response.read(_MAX_RINEX_GZIP_BYTES + 1)
     except (HTTPError, URLError, TimeoutError, OSError) as exc:
-        raise OSError(f"BKG/IGS GLONASS RINEX download failed: {url}: {exc}") from exc
+        raise OSError(f"BKG/IGS {system} RINEX download failed: {url}: {exc}") from exc
     if len(compressed) > _MAX_RINEX_GZIP_BYTES:
         raise ValueError("BKG/IGS RINEX payload exceeds safety limit")
     if not compressed:
@@ -75,7 +75,7 @@ def fetch_bkg_glonass_daily(
     try:
         rinex = gzip.decompress(compressed)
     except OSError as exc:
-        raise ValueError("BKG/IGS GLONASS source is not valid gzip data") from exc
+        raise ValueError(f"BKG/IGS {system} source is not valid gzip data") from exc
     _validate_rinex_nav(rinex)
 
     source_sha = hashlib.sha256(compressed).hexdigest()
@@ -92,7 +92,7 @@ def fetch_bkg_glonass_daily(
     manifest = {
         "schema": "oc-gnss-rinex-cache-v1",
         "provider": "BKG / IGS GNSS Data Center",
-        "constellation": "GLONASS",
+        "constellation": system,
         "format": "RINEX NAV",
         "source_url": url,
         "source_date": day.isoformat(),
@@ -120,3 +120,12 @@ def fetch_bkg_glonass_daily(
         rinex_path=rinex_path,
         manifest_path=manifest_path,
     )
+
+
+def fetch_bkg_glonass_daily(
+    day: date,
+    cache_root: Path,
+    *,
+    timeout_s: float = 30.0,
+) -> CachedRinexNav:
+    return fetch_bkg_gnss_daily(day, "GLONASS", cache_root, timeout_s=timeout_s)
