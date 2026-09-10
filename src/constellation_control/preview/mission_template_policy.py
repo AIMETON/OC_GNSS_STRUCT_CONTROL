@@ -1,27 +1,68 @@
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 from typing import cast
 
 from fastapi import FastAPI
 
 from constellation_control.application.run import load_scenario
-from constellation_control.domain.models import ForceMode
+from constellation_control.domain.models import ForceMode, ScenarioConfig
 from constellation_control.preview.base_preview_shell import preview_catalog
 
 
-def mission_modelling_templates(scenario_root: Path) -> dict[str, object]:
+def _trusted_gnss_system(
+    scenario: ScenarioConfig,
+    by_scenario_id: dict[str, ScenarioConfig],
+) -> str | None:
+    current = scenario
+    seen: set[str] = set()
+    while True:
+        twin = current.digital_twin
+        lineage = None if twin is None else twin.lineage
+        if lineage is None:
+            return None
+        if lineage.source_type == "rinex_nav":
+            record = lineage.source_record_id or ""
+            system = record.split(":", 1)[0].strip()
+            return system or None
+        parent_id = lineage.parent_scenario_id
+        if not parent_id or parent_id in seen:
+            return None
+        seen.add(parent_id)
+        parent = by_scenario_id.get(parent_id)
+        if parent is None:
+            return None
+        current = parent
+
+
+def mission_modelling_templates(scenario_root: Path, *, system: str | None = None) -> dict[str, object]:
     root = scenario_root.resolve()
     names = cast(list[str], preview_catalog(root)["scenarios"])
-    candidates: list[dict[str, object]] = []
+    loaded: list[tuple[str, ScenarioConfig]] = []
     for name in names:
         try:
-            scenario = load_scenario(root / name)
+            loaded.append((name, load_scenario(root / name)))
         except (ValueError, TypeError, OSError):
             continue
+
+    id_counts = Counter(item.scenario_id for _, item in loaded)
+    by_scenario_id = {
+        item.scenario_id: item
+        for _, item in loaded
+        if id_counts[item.scenario_id] == 1
+    }
+    requested_system = None if system is None else system.strip()
+    candidates: list[dict[str, object]] = []
+    for name, scenario in loaded:
         if not scenario.orekit_sidecar_url or not scenario.constellation.satellites:
             continue
         if scenario.force_model.mode not in {ForceMode.DESIGN, ForceMode.VALIDATION}:
+            continue
+        source_system = _trusted_gnss_system(scenario, by_scenario_id)
+        if source_system is None:
+            continue
+        if requested_system and source_system != requested_system:
             continue
         candidates.append(
             {
@@ -35,6 +76,7 @@ def mission_modelling_templates(scenario_root: Path) -> dict[str, object]:
                 "time_scale": scenario.time_scale.value,
                 "orekit_sidecar_url": scenario.orekit_sidecar_url,
                 "spacecraft_template_id": scenario.constellation.satellites[0].satellite_id,
+                "source_system": source_system,
             }
         )
     candidates.sort(
@@ -46,11 +88,13 @@ def mission_modelling_templates(scenario_root: Path) -> dict[str, object]:
     recommended = str(candidates[0]["scenario_name"]) if candidates else None
     return {
         "recommended": recommended,
+        "requested_system": requested_system,
         "candidates": candidates,
         "policy": (
-            "Prefer an operator-selected eligible ScenarioConfig. Otherwise prefer packaged DESIGN authority, "
-            "then VALIDATION authority, deterministic by scenario name. Never use SCREENING or a scenario "
-            "without Orekit/spacecraft authority for RINEX-to-runnable baseline construction."
+            "Automatic/Assisted recommendation is restricted to DESIGN/VALIDATION ScenarioConfigs with Orekit, "
+            "spacecraft authority and traceable RINEX GNSS source lineage for the requested constellation. "
+            "Synthetic smoke scenarios and SCREENING scenarios are never promoted automatically. Manual mode "
+            "remains available for an engineer to establish a new physical spacecraft/modelling profile."
         ),
     }
 
@@ -81,19 +125,19 @@ function installMissionGlobalUi(){
 const missionBaseSetEchelon=setMissionEchelon;
 setMissionEchelon=function(mode){missionBaseSetEchelon(mode);updateGlobalMissionEchelon();};
 
-async function resolveMissionModellingTemplate(preferred){
-  const r=await fetch('/api/mission/modelling-templates');
+async function resolveMissionModellingTemplate(preferred,system){
+  const r=await fetch('/api/mission/modelling-templates?system='+encodeURIComponent(system));
   const d=await r.json();
   if(!r.ok)throw new Error(d.detail||'Modelling template policy failed');
   const candidates=Array.isArray(d.candidates)?d.candidates:[];
   let selected=candidates.find(x=>x.scenario_name===preferred)||null;
   if(!selected&&d.recommended)selected=candidates.find(x=>x.scenario_name===d.recommended)||null;
-  if(!selected)throw new Error('Нет пригодного DESIGN/VALIDATION modelling profile с Orekit authority');
+  if(!selected)throw new Error('Нет подтверждённого source-derived '+system+' modelling profile. В Manual один раз задайте физическую модель КА/authority; synthetic smoke profile автоматически не используется.');
   if(typeof igsTemplateScenario!=='undefined')igsTemplateScenario.value=selected.scenario_name;
   return {selected,policy:d.policy||''};
 }
 function missionTemplateLabel(x){
-  return x.scenario_name+'; '+String(x.force_mode||'').toUpperCase()+'; '+x.gravity_model+' '+x.gravity_degree+'x'+x.gravity_order+'; '+x.frame+'/'+x.time_scale;
+  return x.scenario_name+'; '+String(x.force_mode||'').toUpperCase()+'; '+x.gravity_model+' '+x.gravity_degree+'x'+x.gravity_order+'; '+x.frame+'/'+x.time_scale+'; source='+x.source_system;
 }
 missionPrepareBaseline=async function(){
   const date=(operatorById('missionDate')||{}).value||'';
@@ -110,11 +154,11 @@ missionPrepareBaseline=async function(){
     return;
   }
   let resolved;
-  try{resolved=await resolveMissionModellingTemplate(preferred);}
-  catch(e){missionRefreshNextStep('Не удалось подобрать modelling profile: '+String(e.message||e));return;}
+  try{resolved=await resolveMissionModellingTemplate(preferred,system);}
+  catch(e){missionRefreshNextStep('Автовыбор остановлен: '+String(e.message||e));return;}
   const label=missionTemplateLabel(resolved.selected);
   if(mode==='assisted'){
-    missionRefreshNextStep('Предложен modelling profile: '+label+'. Проверьте его и нажмите «Создать baseline».');
+    missionRefreshNextStep('Предложен подтверждённый modelling profile: '+label+'. Проверьте его и нажмите «Создать baseline».');
     return;
   }
   missionRefreshNextStep('AUTO: выбран '+label+' → IGS/cache → Orekit → runnable ScenarioConfig…');
@@ -130,5 +174,5 @@ bootstrap=async function(){await missionPolicyBootstrap();installMissionGlobalUi
 
 def install_mission_template_policy_routes(app: FastAPI, scenario_root: Path) -> None:
     @app.get("/api/mission/modelling-templates")
-    def templates() -> dict[str, object]:
-        return mission_modelling_templates(scenario_root)
+    def templates(system: str | None = None) -> dict[str, object]:
+        return mission_modelling_templates(scenario_root, system=system)
