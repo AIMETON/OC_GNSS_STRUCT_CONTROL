@@ -111,7 +111,7 @@ SCENARIO_VARIANT_CARD = r"""
 SCENARIO_VARIANT_SCRIPT = r"""
 function scenarioVariantSlug(source){return String(source||'scenario').replace(/\.ya?ml$/i,'').replace(/[^A-Za-z0-9_-]+/g,'-');}
 function syncScenarioVariant(){
-  if(!window.current||!window.scenario)return;
+  if(typeof current==='undefined'||!current||typeof scenario==='undefined'||!scenario)return;
   const n=current.normalized||{};
   variantDuration.value=n.duration_s||current.duration_s||'';
   variantOutputStep.value=n.output_step_s||current.output_step_s||'';
