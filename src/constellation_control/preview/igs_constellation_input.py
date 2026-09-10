@@ -8,7 +8,7 @@ import yaml
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from constellation_control.adapters.bkg_rinex_nav import fetch_bkg_gnss_daily
+from constellation_control.adapters.bkg_rinex_nav import CachedRinexNav, fetch_bkg_gnss_daily
 from constellation_control.adapters.orekit.mean_conversion import (
     OrekitRinexGlonassMeanConversionClient,
     OrekitRinexGnssMeanConversionClient,
@@ -29,10 +29,13 @@ _SYSTEM_PREFIX = {
 }
 
 
-class IgsConstellationRequest(BaseModel):
+class IgsDataFetchRequest(BaseModel):
     source_date: date
     system: IgsSystem
-    source_scenario_name: str
+
+
+class IgsConstellationRequest(IgsDataFetchRequest):
+    template_scenario_name: str
 
 
 def _safe_target(root: Path, name: str) -> Path:
@@ -44,17 +47,47 @@ def _safe_target(root: Path, name: str) -> Path:
     return target
 
 
+def _cache_root(root: Path) -> Path:
+    return root.parent / "data" / "cache" / "rinex"
+
+
+def _cache_result(cached: CachedRinexNav, request: IgsDataFetchRequest) -> dict[str, object]:
+    return {
+        "downloaded": cached.transport != "cache",
+        "cached": True,
+        "system": request.system,
+        "source_date": request.source_date.isoformat(),
+        "source_url": cached.source_url,
+        "source_filename": cached.source_filename,
+        "source_sha256": cached.source_sha256,
+        "rinex_sha256": cached.rinex_sha256,
+        "cached_gzip": str(cached.gzip_path),
+        "cached_rinex": str(cached.rinex_path),
+        "cache_manifest": str(cached.manifest_path),
+        "transport": cached.transport,
+        "requires_orekit": False,
+        "requires_scenario": False,
+    }
+
+
+def fetch_igs_constellation_data(root: Path, request: IgsDataFetchRequest) -> dict[str, object]:
+    cached = fetch_bkg_gnss_daily(request.source_date, request.system, _cache_root(root))
+    return _cache_result(cached, request)
+
+
 def build_igs_constellation_scenario(root: Path, request: IgsConstellationRequest) -> dict[str, object]:
-    source = load_scenario(root / request.source_scenario_name)
+    if not request.template_scenario_name:
+        raise ValueError("select an explicit template scenario")
+
+    source = load_scenario(root / request.template_scenario_name)
     if not source.constellation.satellites:
-        raise ValueError("active scenario contains no spacecraft template")
+        raise ValueError("template scenario contains no spacecraft template")
     if not source.orekit_sidecar_url:
-        raise ValueError("active scenario has no orekit_sidecar_url")
+        raise ValueError("selected template scenario has no orekit_sidecar_url")
 
     template = source.constellation.satellites[0]
     target_epoch = datetime.combine(request.source_date, time.min, tzinfo=UTC)
-    cache_root = root.parent / "data" / "cache" / "rinex"
-    cached = fetch_bkg_gnss_daily(request.source_date, request.system, cache_root)
+    cached = fetch_bkg_gnss_daily(request.source_date, request.system, _cache_root(root))
     rinex_text = cached.rinex_path.read_text(encoding="ascii", errors="strict")
 
     if request.system == "GLONASS":
@@ -113,11 +146,14 @@ def build_igs_constellation_scenario(root: Path, request: IgsConstellationReques
         source_sha256=cached.source_sha256,
         source_record_id=f"{request.system}:{len(satellites)}:{request.source_date.isoformat()}",
         authority=(
-            f"BKG/IGS RINEX NAV; system={request.system}; "
+            f"IGS RINEX NAV; system={request.system}; "
+            f"source_url={cached.source_url}; "
+            f"source_transport={cached.transport}; "
             f"target_epoch={target_epoch.isoformat()}; "
             f"max_ephemeris_age_s={DEFAULT_MAX_EPHEMERIS_AGE_S}; "
             f"glonass_propagation_step_s={DEFAULT_GLONASS_PROPAGATION_STEP_S if request.system == 'GLONASS' else 'n/a'}; "
-            f"spacecraft_template={template.satellite_id}"
+            f"spacecraft_template={template.satellite_id}; "
+            f"template_scenario={request.template_scenario_name}"
         ),
     )
     prior_twin = source.digital_twin or DigitalTwinConfig()
@@ -148,6 +184,8 @@ def build_igs_constellation_scenario(root: Path, request: IgsConstellationReques
         "source_sha256": cached.source_sha256,
         "rinex_sha256": cached.rinex_sha256,
         "cached_rinex": str(cached.rinex_path),
+        "source_transport": cached.transport,
+        "template_scenario_name": request.template_scenario_name,
         "template_satellite_id": template.satellite_id,
         "max_ephemeris_age_s": DEFAULT_MAX_EPHEMERIS_AGE_S,
         "glonass_propagation_step_s": (
@@ -160,7 +198,7 @@ def build_igs_constellation_scenario(root: Path, request: IgsConstellationReques
 IGS_CONSTELLATION_CARD = r"""
 <div class="card primary-input-card" id="igsConstellationCard">
   <h3>Источник орбитальной группировки</h3>
-  <p class="hint">Основной рабочий путь: выберите дату и систему. Программа сама скачает RINEX NAV с IGS/BKG, сохранит исходник, сформирует внутренний ScenarioConfig и сделает его активным.</p>
+  <p class="hint">Два независимых этапа: сначала загрузите RINEX NAV из IGS — для этого не нужен активный сценарий и Orekit. Затем, когда данные уже в локальном immutable-cache, явно выберите базовую модель и сформируйте runnable ScenarioConfig через Orekit.</p>
   <div class="grid">
     <label>Стартовая дата
       <input id="igsStartDate" type="date">
@@ -174,28 +212,59 @@ IGS_CONSTELLATION_CARD = r"""
       </select>
     </label>
   </div>
-  <button onclick="buildIgsConstellation()">Скачать IGS и сформировать сценарий</button>
+  <button onclick="fetchIgsConstellationData()">1. Скачать IGS RINEX</button>
+  <div id="igsConstellationFetchStatus" class="status"></div>
+  <div class="grid">
+    <label>Базовая модель сценария — выбрать явно
+      <select id="igsTemplateScenario"><option value="">— выберите —</option></select>
+    </label>
+  </div>
+  <button onclick="buildIgsConstellation()">2. Сформировать сценарий</button>
   <div id="igsConstellationStatus" class="status"></div>
   <pre id="igsConstellationResult"></pre>
   <details>
     <summary>Используемая инженерная политика</summary>
-    <p class="hint">Источник: BKG/IGS daily RINEX NAV. Целевая эпоха: 00:00 UTC выбранной даты. Допустимый возраст ближайшего broadcast ephemeris: 7200 s. Для ГЛОНАСС шаг broadcast propagation: 60 s. Модель КА берётся из первого КА активного базового сценария. Все значения записываются в lineage.</p>
+    <p class="hint">Сетевой intake зависит только от даты и GNSS. Он выполняется cache-first и не требует Orekit. При формировании ScenarioConfig базовая модель выбирается явно и задаёт force model, frame/time scale, integrator и физическую модель КА. Целевая эпоха: 00:00 UTC выбранной даты. Допустимый возраст ближайшего broadcast ephemeris: 7200 s. Для ГЛОНАСС шаг broadcast propagation: 60 s. Все источники и выбранная базовая модель записываются в lineage.</p>
   </details>
 </div>
 """
 
+
 IGS_CONSTELLATION_SCRIPT = r"""
+function syncIgsTemplateScenarios(){
+  if(typeof catalog==='undefined'||!catalog||!Array.isArray(catalog.scenarios))return;
+  const previous=igsTemplateScenario.value;
+  const opts=[(()=>{const o=document.createElement('option');o.value='';o.textContent='— выберите —';return o;})(),...catalog.scenarios.map(x=>{const o=document.createElement('option');o.value=x;o.textContent=x;return o;})];
+  igsTemplateScenario.replaceChildren(...opts);
+  if(previous&&catalog.scenarios.includes(previous))igsTemplateScenario.value=previous;
+}
+async function fetchIgsConstellationData(){
+  const date=igsStartDate.value;
+  if(!date){igsConstellationFetchStatus.textContent='Укажите стартовую дату';igsConstellationFetchStatus.className='status danger';return;}
+  const p={source_date:date,system:igsSystem.value};
+  igsConstellationFetchStatus.textContent='IGS/BKG → RINEX NAV → локальный cache…';igsConstellationFetchStatus.className='status';
+  try{
+    const r=await fetch('/api/igs-constellation/fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
+    const d=await r.json();if(!r.ok)throw new Error(d.detail||'IGS data fetch failed');
+    igsConstellationResult.textContent=JSON.stringify(d,null,2);
+    igsConstellationFetchStatus.textContent='DATA READY: '+d.source_filename+'; transport='+d.transport;
+    igsConstellationFetchStatus.className='status ok';
+  }catch(e){igsConstellationFetchStatus.textContent=String(e.message||e);igsConstellationFetchStatus.className='status danger';}
+}
 async function buildIgsConstellation(){
   const date=igsStartDate.value;
   if(!date){igsConstellationStatus.textContent='Укажите стартовую дату';igsConstellationStatus.className='status danger';return;}
-  const p={source_date:date,system:igsSystem.value,source_scenario_name:scenario.value};
-  igsConstellationStatus.textContent='IGS/BKG → RINEX NAV → Orekit → ScenarioConfig…';igsConstellationStatus.className='status';
+  const template=igsTemplateScenario.value;
+  if(!template){igsConstellationStatus.textContent='Явно выберите базовую модель сценария';igsConstellationStatus.className='status danger';return;}
+  const p={source_date:date,system:igsSystem.value,template_scenario_name:template};
+  igsConstellationStatus.textContent='Локальный RINEX → Orekit → ScenarioConfig…';igsConstellationStatus.className='status';
   try{
     const r=await fetch('/api/igs-constellation/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
-    const d=await r.json();if(!r.ok)throw new Error(d.detail||'IGS intake failed');
+    const d=await r.json();if(!r.ok)throw new Error(d.detail||'IGS scenario build failed');
     igsConstellationResult.textContent=JSON.stringify(d,null,2);
     const c=await fetch('/api/scenarios');catalog=await c.json();
     scenario.replaceChildren(...catalog.scenarios.map(x=>{const o=document.createElement('option');o.value=x;o.textContent=x;return o;}));
+    syncIgsTemplateScenarios();
     scenario.value=d.scenario_name;await loadScenario();
     igsConstellationStatus.textContent='RUNNABLE: '+d.scenario_name+'; '+d.system+'; КА='+d.satellite_count;
     igsConstellationStatus.className='status ok';
@@ -205,6 +274,13 @@ async function buildIgsConstellation(){
 
 
 def install_igs_constellation_routes(app: FastAPI, scenario_root: Path) -> None:
+    @app.post("/api/igs-constellation/fetch")
+    def fetch_data(request: IgsDataFetchRequest) -> dict[str, object]:
+        try:
+            return fetch_igs_constellation_data(scenario_root, request)
+        except (ValueError, RuntimeError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.post("/api/igs-constellation/create")
     def create(request: IgsConstellationRequest) -> dict[str, object]:
         try:
