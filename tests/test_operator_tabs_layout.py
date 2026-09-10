@@ -3,6 +3,7 @@ from constellation_control.preview.gravity_release_app import (
     render_preview_page_for_test,
 )
 from constellation_control.preview.operator_tabs import OPERATOR_TABS_CARD, OPERATOR_TABS_SCRIPT
+from constellation_control.preview.scenario_workspace import SCENARIO_VARIANT_SCRIPT
 
 
 def test_top_level_workspace_follows_mission_research_flow() -> None:
@@ -24,6 +25,7 @@ def test_mission_workspace_exposes_all_three_aimeton_echelons() -> None:
     assert "setMissionEchelon('assisted')" in OPERATOR_TABS_CARD
     assert "setMissionEchelon('auto')" in OPERATOR_TABS_CARD
     assert "localStorage.setItem('mission-echelon',mode)" in OPERATOR_TABS_SCRIPT
+    assert "||'assisted'" in OPERATOR_TABS_SCRIPT
 
 
 def test_scenario_workspace_has_fast_creation_and_variant_groups() -> None:
@@ -52,12 +54,28 @@ def test_runtime_progress_is_only_in_results_workspace() -> None:
     assert "operatorMoveCard('runProgressCard','operatorTabScenarios')" not in OPERATOR_TABS_SCRIPT
 
 
-def test_auto_baseline_is_governed_and_fail_closed() -> None:
+def test_auto_baseline_uses_governed_composite_and_fails_closed() -> None:
     assert "if(!selected){missionRefreshNextStep('AUTO остановлен" in OPERATOR_TABS_SCRIPT
-    assert "await fetchIgsConstellationData();" in OPERATOR_TABS_SCRIPT
-    assert "await buildIgsConstellation();" in OPERATOR_TABS_SCRIPT
-    assert "igsConstellationFetchStatus.classList.contains('danger')" in OPERATOR_TABS_SCRIPT
-    assert "igsConstellationStatus.classList.contains('danger')" in OPERATOR_TABS_SCRIPT
+    assert "if(typeof createIgsBaseline!=='function')" in OPERATOR_TABS_SCRIPT
+    assert "const ok=await createIgsBaseline();" in OPERATOR_TABS_SCRIPT
+    assert "ok?'AUTO baseline готов." in OPERATOR_TABS_SCRIPT
+    assert "AUTO остановлен. Подробности" in OPERATOR_TABS_SCRIPT
+
+
+def test_assisted_prefills_template_but_requires_operator_confirmation() -> None:
+    assert "if(mode!=='manual'&&typeof igsTemplateScenario!=='undefined'&&selected)" in OPERATOR_TABS_SCRIPT
+    assert "Полуавтоматический эшелон" in OPERATOR_TABS_SCRIPT
+    assisted = OPERATOR_TABS_SCRIPT.split("if(mode==='assisted')", 1)[1].split("if(!selected)", 1)[0]
+    assert "createIgsBaseline" not in assisted
+
+
+def test_preview_state_is_accessed_as_lexical_state_not_window_property() -> None:
+    assert "window.current" not in OPERATOR_TABS_SCRIPT
+    assert "window.scenario" not in OPERATOR_TABS_SCRIPT
+    assert "window.current" not in SCENARIO_VARIANT_SCRIPT
+    assert "window.scenario" not in SCENARIO_VARIANT_SCRIPT
+    assert "typeof current!=='undefined'" in OPERATOR_TABS_SCRIPT
+    assert "typeof current==='undefined'" in SCENARIO_VARIANT_SCRIPT
 
 
 def test_galileo_gsc_card_is_rendered_exactly_once_and_routed_to_expert() -> None:
