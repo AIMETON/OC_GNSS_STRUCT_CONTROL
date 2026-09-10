@@ -33,8 +33,8 @@ OPERATOR_TABS_CARD = r"""
     <p class="hint">Выберите способ формирования исходного состояния. Импорт и генераторы создают данные сценария; расчётная телеметрия и результаты здесь не отображаются.</p>
   </div>
   <section class="operator-input-group" id="operatorInputOfficialSources">
-    <h3>1. Официальные внешние источники / Official external sources</h3>
-    <p class="hint">GNSS almanac, IAC/NAVCEN, Galileo GSC и NORAD/TLE.</p>
+    <h3>Источник орбитальной группировки</h3>
+    <p class="hint">Основной рабочий путь — IGS/BKG RINEX NAV. Выберите дату и систему; загрузка и формирование сценария выполняются автоматически.</p>
   </section>
   <section class="operator-input-group" id="operatorInputManualState">
     <h3>2. Явное состояние КА / Explicit spacecraft state</h3>
@@ -122,7 +122,8 @@ function arrangeOperatorTabs(){
 
   ['scenarioSummaryCard','constellationSummaryCard','geometrySummaryCard','scenarioEditorCard','gravityModelCard','constellationEditorCard','perturbationCard','spacecraftCatalogCard','resourceStateCard'].forEach(id=>operatorMoveCard(id,'operatorTabScenarios'));
 
-  ['galileoGscCard','iacGnssCard','glonassAlmanacCard','gnssAlmanacCard','noradCard'].forEach(id=>operatorMoveCard(id,'operatorInputOfficialSources'));
+  ['igsConstellationCard'].forEach(id=>operatorMoveCard(id,'operatorInputOfficialSources'));
+  ['galileoGscCard','iacGnssCard','glonassAlmanacCard','gnssAlmanacCard','noradCard','glonassRinexRunnerCard','iacGlonassRunnerCard','iacGlonassConstellationCard','navcenGpsRunnerCard','mixedGnssRunnerCard'].forEach(id=>operatorMoveCard(id,'operatorTabExpert'));
   ['osculatingCard'].forEach(id=>operatorMoveCard(id,'operatorInputManualState'));
   ['walkerCard'].forEach(id=>operatorMoveCard(id,'operatorInputSynthesis'));
   ['workbookCard'].forEach(id=>operatorMoveCard(id,'operatorInputBulk'));
