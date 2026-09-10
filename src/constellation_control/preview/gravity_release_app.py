@@ -50,6 +50,11 @@ from constellation_control.preview.operator_tabs import (
     OPERATOR_TABS_SCRIPT,
     OPERATOR_TABS_STYLE,
 )
+from constellation_control.preview.scenario_workspace import (
+    SCENARIO_VARIANT_CARD,
+    SCENARIO_VARIANT_SCRIPT,
+    install_scenario_variant_routes,
+)
 from constellation_control.version import __version__ as PREVIEW_VERSION
 
 
@@ -70,6 +75,7 @@ def render_preview_page_for_test() -> str:
             f"{IAC_GLONASS_CONSTELLATION_CARD}"
             f"{NAVCEN_GPS_RUNNER_CARD}"
             f"{MIXED_GNSS_RUNNER_CARD}"
+            f"{SCENARIO_VARIANT_CARD}"
             f"{GRAVITY_MODEL_CARD}</section></main>"
         ),
         1,
@@ -82,12 +88,14 @@ def render_preview_page_for_test() -> str:
         f"{IAC_GLONASS_CONSTELLATION_SCRIPT}\n"
         f"{NAVCEN_GPS_RUNNER_SCRIPT}\n"
         f"{MIXED_GNSS_RUNNER_SCRIPT}\n"
+        f"{SCENARIO_VARIANT_SCRIPT}\n"
         f"{GRAVITY_MODEL_SCRIPT}\n"
         "const gravityBootstrap=bootstrap;"
         "bootstrap=async function(){"
         "await gravityBootstrap();"
         "if(typeof syncIgsTemplateScenarios==='function')syncIgsTemplateScenarios();"
         "if(typeof syncGravityModel==='function')syncGravityModel();"
+        "if(typeof syncScenarioVariant==='function')syncScenarioVariant();"
         "if(typeof syncGlonassRinexTemplate==='function')syncGlonassRinexTemplate();"
         "if(typeof syncIacGlonassRunnerSatellites==='function')syncIacGlonassRunnerSatellites();"
         "if(typeof syncIacGloConstTemplate==='function')syncIacGloConstTemplate();"
@@ -123,5 +131,6 @@ def create_preview_app(scenario_root: Path = Path("scenarios"), output_root: Pat
     install_iac_glonass_constellation_routes(app, scenario_root)
     install_navcen_gps_runner_routes(app, scenario_root)
     install_mixed_gnss_runner_routes(app, scenario_root)
+    install_scenario_variant_routes(app, scenario_root)
     install_gravity_model_routes(app, scenario_root)
     return app
