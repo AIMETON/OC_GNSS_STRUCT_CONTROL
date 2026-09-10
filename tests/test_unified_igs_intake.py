@@ -32,9 +32,12 @@ def test_operator_inputs_show_two_stage_igs_workflow() -> None:
 
 def test_igs_fetch_payload_has_no_active_scenario_dependency() -> None:
     page = render_preview_page_for_test()
-    assert "const p={source_date:date,system:igsSystem.value};" in page
+    fetch_script = page.split("async function fetchIgsConstellationData(){", 1)[1].split(
+        "async function buildIgsConstellation(){", 1
+    )[0]
+    assert "const p={source_date:date,system:igsSystem.value};" in fetch_script
+    assert "scenario.value" not in fetch_script
     assert "template_scenario_name:template" in page
-    assert "source_scenario_name:scenario.value" not in page
 
 
 def test_igs_fetch_request_requires_no_scenario_or_orekit(tmp_path: Path, monkeypatch) -> None:
