@@ -6,8 +6,8 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+
+from constellation_control.adapters.reviewed_http_fetch import fetch_reviewed_url
 
 BKG_IGS_BRDC_ROOT = "https://igs.bkg.bund.de/root_ftp/IGS/BRDC"
 _MAX_RINEX_GZIP_BYTES = 64 * 1024 * 1024
@@ -29,6 +29,7 @@ class CachedRinexNav:
     gzip_path: Path
     rinex_path: Path
     manifest_path: Path
+    transport: str
 
 
 def bkg_gnss_daily_url(day: date, system: str) -> str:
@@ -56,6 +57,61 @@ def _validate_rinex_nav(raw: bytes) -> None:
         raise ValueError("RINEX navigation header is incomplete")
 
 
+def _cached_rinex_if_valid(
+    *,
+    day: date,
+    system: str,
+    filename: str,
+    gzip_path: Path,
+    rinex_path: Path,
+    manifest_path: Path,
+) -> CachedRinexNav | None:
+    if not (gzip_path.is_file() and rinex_path.is_file() and manifest_path.is_file()):
+        return None
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid RINEX cache manifest: {manifest_path}: {exc}") from exc
+
+    if manifest.get("source_date") != day.isoformat():
+        raise ValueError("RINEX cache manifest date does not match requested date")
+    if manifest.get("constellation") != system:
+        raise ValueError("RINEX cache manifest constellation does not match requested system")
+    if manifest.get("source_filename") != filename:
+        raise ValueError("RINEX cache manifest filename does not match requested source")
+
+    compressed = gzip_path.read_bytes()
+    rinex = rinex_path.read_bytes()
+    if len(compressed) > _MAX_RINEX_GZIP_BYTES:
+        raise ValueError("cached BKG/IGS RINEX payload exceeds safety limit")
+    try:
+        decompressed = gzip.decompress(compressed)
+    except OSError as exc:
+        raise ValueError("cached BKG/IGS source is not valid gzip data") from exc
+    if decompressed != rinex:
+        raise ValueError("cached RINEX gzip and decompressed payload differ")
+    _validate_rinex_nav(rinex)
+
+    source_sha = hashlib.sha256(compressed).hexdigest()
+    rinex_sha = hashlib.sha256(rinex).hexdigest()
+    if manifest.get("source_sha256") != source_sha or manifest.get("rinex_sha256") != rinex_sha:
+        raise ValueError("cached RINEX SHA-256 does not match manifest")
+
+    source_url = str(manifest.get("source_url") or bkg_gnss_daily_url(day, system))
+    return CachedRinexNav(
+        source_url=source_url,
+        source_date=day,
+        source_filename=filename,
+        source_sha256=source_sha,
+        rinex_sha256=rinex_sha,
+        gzip_path=gzip_path,
+        rinex_path=rinex_path,
+        manifest_path=manifest_path,
+        transport="cache",
+    )
+
+
 def fetch_bkg_gnss_daily(
     day: date,
     system: str,
@@ -65,6 +121,7 @@ def fetch_bkg_gnss_daily(
 ) -> CachedRinexNav:
     if timeout_s <= 0.0:
         raise ValueError("timeout_s must be positive")
+
     url = bkg_gnss_daily_url(day, system)
     filename = url.rsplit("/", 1)[-1]
     doy = day.timetuple().tm_yday
@@ -74,13 +131,26 @@ def fetch_bkg_gnss_daily(
     rinex_path = directory / filename.removesuffix(".gz")
     manifest_path = directory / (filename + ".manifest.json")
 
-    request = Request(url, headers={"User-Agent": "OC-GNSS-STRUCT-CONTROL/0.2.10"})
+    cached = _cached_rinex_if_valid(
+        day=day,
+        system=system,
+        filename=filename,
+        gzip_path=gzip_path,
+        rinex_path=rinex_path,
+        manifest_path=manifest_path,
+    )
+    if cached is not None:
+        return cached
+
     try:
-        with urlopen(request, timeout=timeout_s) as response:  # noqa: S310 - fixed reviewed HTTPS origin
-            content_type = (response.headers.get("Content-Type") or "").lower()
-            compressed = response.read(_MAX_RINEX_GZIP_BYTES + 1)
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
-        raise OSError(f"BKG/IGS {system} RINEX download failed: {url}: {exc}") from exc
+        response = fetch_reviewed_url(url, timeout_s=timeout_s)
+    except OSError as exc:
+        raise OSError(
+            f"BKG/IGS {system} RINEX download failed via urllib/curl: {url}: {exc}"
+        ) from exc
+
+    content_type = response.content_type.lower()
+    compressed = response.raw
     if len(compressed) > _MAX_RINEX_GZIP_BYTES:
         raise ValueError("BKG/IGS RINEX payload exceeds safety limit")
     if not compressed:
@@ -116,6 +186,7 @@ def fetch_bkg_gnss_daily(
         "rinex_sha256": rinex_sha,
         "gzip_path": str(gzip_path),
         "rinex_path": str(rinex_path),
+        "transport": response.transport,
         "cached_at_utc": datetime.now(UTC).isoformat(),
     }
     if manifest_path.exists():
@@ -134,6 +205,7 @@ def fetch_bkg_gnss_daily(
         gzip_path=gzip_path,
         rinex_path=rinex_path,
         manifest_path=manifest_path,
+        transport=response.transport,
     )
 
 
