@@ -11,6 +11,12 @@ from urllib.request import Request, urlopen
 
 BKG_IGS_BRDC_ROOT = "https://igs.bkg.bund.de/root_ftp/IGS/BRDC"
 _MAX_RINEX_GZIP_BYTES = 64 * 1024 * 1024
+_SYSTEM_SUFFIX = {
+    "GLONASS": "RN",
+    "GPS": "GN",
+    "Galileo": "EN",
+    "BeiDou": "CN",
+}
 
 
 @dataclass(frozen=True)
@@ -25,10 +31,18 @@ class CachedRinexNav:
     manifest_path: Path
 
 
-def bkg_glonass_daily_url(day: date) -> str:
+def bkg_gnss_daily_url(day: date, system: str) -> str:
+    try:
+        suffix = _SYSTEM_SUFFIX[system]
+    except KeyError as exc:
+        raise ValueError(f"unsupported GNSS system: {system}") from exc
     doy = day.timetuple().tm_yday
-    filename = f"BRDC00WRD_R_{day.year:04d}{doy:03d}0000_01D_RN.rnx.gz"
+    filename = f"BRDC00WRD_R_{day.year:04d}{doy:03d}0000_01D_{suffix}.rnx.gz"
     return f"{BKG_IGS_BRDC_ROOT}/{day.year:04d}/{doy:03d}/{filename}"
+
+
+def bkg_glonass_daily_url(day: date) -> str:
+    return bkg_gnss_daily_url(day, "GLONASS")
 
 
 def _validate_rinex_nav(raw: bytes) -> None:
@@ -42,8 +56,9 @@ def _validate_rinex_nav(raw: bytes) -> None:
         raise ValueError("RINEX navigation header is incomplete")
 
 
-def fetch_bkg_glonass_daily(
+def fetch_bkg_gnss_daily(
     day: date,
+    system: str,
     cache_root: Path,
     *,
     timeout_s: float = 30.0,
