@@ -10,6 +10,11 @@ from constellation_control.preview.consolidated_release_app import (
     create_preview_app as create_consolidated_preview_app,
     render_preview_page_for_test as render_consolidated_page,
 )
+from constellation_control.preview.igs_constellation_input import (
+    IGS_CONSTELLATION_CARD,
+    IGS_CONSTELLATION_SCRIPT,
+    install_igs_constellation_routes,
+)
 from constellation_control.preview.glonass_rinex_runner import (
     GLONASS_RINEX_CARD,
     GLONASS_RINEX_SCRIPT,
@@ -59,6 +64,7 @@ def render_preview_page_for_test() -> str:
     page = page.replace(
         "</section></main>",
         (
+            f"{IGS_CONSTELLATION_CARD}"
             f"{GLONASS_RINEX_CARD}"
             f"{IAC_GLONASS_RUNNER_CARD}"
             f"{IAC_GLONASS_CONSTELLATION_CARD}"
@@ -70,6 +76,7 @@ def render_preview_page_for_test() -> str:
     )
     page = page.replace(
         "bootstrap().catch(e=>setStatus(String(e),'danger'));",
+        f"{IGS_CONSTELLATION_SCRIPT}\n"
         f"{GLONASS_RINEX_SCRIPT}\n"
         f"{IAC_GLONASS_RUNNER_SCRIPT}\n"
         f"{IAC_GLONASS_CONSTELLATION_SCRIPT}\n"
@@ -109,6 +116,7 @@ def create_preview_app(scenario_root: Path = Path("scenarios"), output_root: Pat
     def health() -> dict[str, str]:
         return {"status": "ok", "preview": PREVIEW_VERSION}
 
+    install_igs_constellation_routes(app, scenario_root)
     install_glonass_rinex_runner_routes(app, scenario_root)
     install_iac_glonass_runner_routes(app, scenario_root)
     install_iac_glonass_constellation_routes(app, scenario_root)
