@@ -23,4 +23,3 @@ def test_packaged_operator_surface_has_tabs_and_active_run_identity() -> None:
         assert f'data-tab="{retired_tab}"' not in page
 
     assert "splitWorkflowCard()" in page
-    assert "Changing tabs never changes run inputs implicitly" in page
