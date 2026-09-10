@@ -56,6 +56,31 @@ def mission_modelling_templates(scenario_root: Path) -> dict[str, object]:
 
 
 MISSION_TEMPLATE_POLICY_SCRIPT = r"""
+function missionEchelonLabel(mode){
+  return mode==='manual'?'Ручной / Manual':mode==='auto'?'Автоматический / Automatic':'Полуавтоматический / Assisted';
+}
+function updateGlobalMissionEchelon(){
+  const e=operatorById('activeEchelon');
+  if(e)e.textContent=missionEchelonLabel(localStorage.getItem('mission-echelon')||'assisted');
+}
+function installMissionGlobalUi(){
+  const grid=operatorById('activeRunConfigurationCard')&&operatorById('activeRunConfigurationCard').querySelector('.active-run-grid');
+  if(grid&&!operatorById('activeEchelon')){
+    const item=document.createElement('div');
+    item.innerHTML='<b>AIMETON echelon</b><div id="activeEchelon">—</div>';
+    grid.prepend(item);
+  }
+  const other=operatorById('other');
+  const expert=operatorById('operatorTabExpert');
+  if(other&&expert){
+    const card=other.closest('.card');
+    if(card){card.id=card.id||'otherYamlInputsCard';expert.appendChild(card);}
+  }
+  updateGlobalMissionEchelon();
+}
+const missionBaseSetEchelon=setMissionEchelon;
+setMissionEchelon=function(mode){missionBaseSetEchelon(mode);updateGlobalMissionEchelon();};
+
 async function resolveMissionModellingTemplate(preferred){
   const r=await fetch('/api/mission/modelling-templates');
   const d=await r.json();
@@ -97,6 +122,9 @@ missionPrepareBaseline=async function(){
   const ok=await createIgsBaseline();
   missionRefreshNextStep(ok?'AUTO baseline готов. Следующий шаг: создать вариант или перейти к экспериментам.':'AUTO остановлен. Подробности показаны в baseline-карточке.');
 }
+
+const missionPolicyBootstrap=bootstrap;
+bootstrap=async function(){await missionPolicyBootstrap();installMissionGlobalUi();};
 """
 
 
