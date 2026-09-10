@@ -86,6 +86,7 @@ def render_preview_page_for_test() -> str:
         "const gravityBootstrap=bootstrap;"
         "bootstrap=async function(){"
         "await gravityBootstrap();"
+        "if(typeof syncIgsTemplateScenarios==='function')syncIgsTemplateScenarios();"
         "if(typeof syncGravityModel==='function')syncGravityModel();"
         "if(typeof syncGlonassRinexTemplate==='function')syncGlonassRinexTemplate();"
         "if(typeof syncIacGlonassRunnerSatellites==='function')syncIacGlonassRunnerSatellites();"
