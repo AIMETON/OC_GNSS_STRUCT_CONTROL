@@ -39,7 +39,7 @@ OPERATOR_TABS_CARD = r"""
   </div>
   <section class="operator-input-group" id="operatorInputOfficialSources">
     <h3>Источник орбитальной группировки</h3>
-    <p class="hint">Основной рабочий путь — IGS/BKG RINEX NAV. Выберите дату и систему; загрузка и формирование сценария выполняются автоматически.</p>
+    <p class="hint">Основной рабочий путь — IGS/BKG RINEX NAV. Загрузка данных зависит только от даты и системы; формирование runnable ScenarioConfig выполняется отдельным шагом после явного выбора базовой модели.</p>
   </section>
   <section class="operator-input-group" id="operatorInputManualState">
     <h3>2. Явное состояние КА / Explicit spacecraft state</h3>
