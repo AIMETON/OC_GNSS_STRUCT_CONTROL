@@ -1,5 +1,5 @@
-from pathlib import Path
 import shutil
+from pathlib import Path
 
 from constellation_control.application.run import load_scenario
 from constellation_control.preview.scenario_workspace import (
