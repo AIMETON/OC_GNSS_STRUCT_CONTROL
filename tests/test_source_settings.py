@@ -67,6 +67,15 @@ def test_fcnd_is_explicit_russian_gnss_source() -> None:
     assert "broadcast_rinex_nav" in fcnd.capabilities
 
 
+def test_iac_live_gps_and_beidou_sources_are_registered() -> None:
+    by_id = {item.source_id: item for item in DEFAULT_SOURCE_SETTINGS.sources}
+    assert by_id["iac_gps"].request_template.endswith("/gps/ephemeris/ephemeris_json.php")
+    assert "gps_almanac_table" in by_id["iac_gps"].capabilities
+    assert by_id["iac_beidou_almanac"].request_template.endswith("/beidou/ephemeris/beidou_almanac_calc.php")
+    assert "beidou_almanac_table" in by_id["iac_beidou_almanac"].capabilities
+    assert by_id["iac_beidou_constellation"].request_template.endswith("/beidou/sostavOG/")
+
+
 def test_auto_source_selection_preserves_operator_order(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("OC_GNSS_SOURCE_SETTINGS", str(tmp_path / "source_endpoints.json"))
     document = DEFAULT_SOURCE_SETTINGS.model_copy(deep=True)
@@ -86,7 +95,11 @@ def test_v2_settings_migrate_fcnd_without_losing_operator_values(tmp_path: Path,
     monkeypatch.setenv("OC_GNSS_SOURCE_SETTINGS", str(path))
     old = DEFAULT_SOURCE_SETTINGS.model_copy(deep=True)
     old.version = 2
-    old.sources = [item for item in old.sources if item.source_id != "fcnd_api"]
+    old.sources = [
+        item
+        for item in old.sources
+        if item.source_id not in {"fcnd_api", "iac_gps", "iac_beidou_almanac", "iac_beidou_constellation"}
+    ]
     bkg = next(item for item in old.sources if item.source_id == "igs_bkg")
     bkg.base_url = "https://operator.example.test/brdc"
     old.selection["GLONASS"].auto_order = ["iac_glonass", "iac_ftp_archive", "igs_bkg", "igs_whu"]
@@ -97,6 +110,7 @@ def test_v2_settings_migrate_fcnd_without_losing_operator_values(tmp_path: Path,
     upgraded = load_source_settings()
     assert upgraded.version == 3
     assert any(item.source_id == "fcnd_api" for item in upgraded.sources)
+    assert any(item.source_id == "iac_gps" for item in upgraded.sources)
     assert next(item for item in upgraded.sources if item.source_id == "igs_bkg").base_url == "https://operator.example.test/brdc"
     assert upgraded.selection["GLONASS"].auto_order == [
         "iac_glonass",
@@ -129,10 +143,11 @@ def test_settings_api_round_trip(tmp_path: Path, monkeypatch) -> None:
     assert initial.status_code == 200
     payload = initial.json()
     assert payload["version"] == 3
-    assert len(payload["sources"]) == 9
+    assert len(payload["sources"]) == 12
     assert any(item["source_id"] == "igs_whu" for item in payload["sources"])
     assert any(item["source_id"] == "iac_ftp_archive" for item in payload["sources"])
     assert any(item["source_id"] == "fcnd_api" for item in payload["sources"])
+    assert any(item["source_id"] == "iac_gps" for item in payload["sources"])
     assert payload["selection"]["GLONASS"]["mode"] == "auto"
     payload["sources"][0]["base_url"] = "https://example.test/nav"
     payload["selection"]["GLONASS"]["mode"] = "manual"
@@ -150,4 +165,4 @@ def test_saved_settings_file_is_valid_json(tmp_path: Path, monkeypatch) -> None:
     save_source_settings(DEFAULT_SOURCE_SETTINGS.model_copy(deep=True))
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["version"] == 3
-    assert len(payload["sources"]) == 9
+    assert len(payload["sources"]) == 12
