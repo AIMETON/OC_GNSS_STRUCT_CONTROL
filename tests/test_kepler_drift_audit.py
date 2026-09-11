@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import yaml
 
 from constellation_control.application.kepler_drift_audit import enrich_run_with_kepler_drift_audit
 from constellation_control.application.run import run_scenario
@@ -68,3 +69,24 @@ def test_preview_duration_path_runs_kepler_audit_automatically(tmp_path: Path) -
     summary = json.loads((completed.run_dir / "summary.json").read_text(encoding="utf-8"))
     assert len(summary["kepler_drift_consistency"]) == 1
     assert summary["kepler_drift_consistency"][0]["pair_id"] == "DEMO-ADD-45/DEMO-REF"
+
+
+def test_preview_duration_baseline_without_relative_pairs_completes(tmp_path: Path) -> None:
+    payload = yaml.safe_load(SCENARIO.read_text(encoding="utf-8"))
+    payload["scenario_id"] = "reference-only-baseline"
+    for satellite in payload["constellation"]["satellites"]:
+        satellite["role"] = "reference"
+        satellite.pop("reference_id", None)
+    scenario_path = tmp_path / "reference-only.yaml"
+    scenario_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    completed = run_scenario_with_duration(
+        scenario_path,
+        tmp_path / "preview-reference-only",
+        preset="scenario",
+    )
+
+    summary = json.loads((completed.run_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["relative_operations"] == []
+    assert (completed.run_dir / "timeseries.csv").read_text(encoding="utf-8") == "\n"
+    assert not (completed.run_dir / "kepler_drift_consistency.json").exists()
