@@ -113,7 +113,7 @@ def fetch_reviewed_url(
         except OSError as exc:
             curl_error = exc
 
-        urllib_error: Exception | None = None
+        ftp_urllib_error: Exception | None = None
         try:
             with urlopen(url, timeout=max(timeout_s, 60.0)) as response:  # noqa: S310 - caller allowlists URL
                 return ReviewedHttpResponse(
@@ -122,14 +122,14 @@ def fetch_reviewed_url(
                     transport="urllib-ftp",
                 )
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
-            urllib_error = exc
+            ftp_urllib_error = exc
         raise OSError(
             "FTP fetch failed via both transports; "
-            f"curl={curl_error}; urllib={urllib_error}"
-        ) from urllib_error
+            f"curl={curl_error}; urllib={ftp_urllib_error}"
+        ) from ftp_urllib_error
 
     request = Request(url, headers=_BROWSER_HEADERS)
-    urllib_error: Exception | None = None
+    http_urllib_error: Exception | None = None
     try:
         with urlopen(request, timeout=timeout_s) as response:  # noqa: S310 - caller performs allowlist validation
             return ReviewedHttpResponse(
@@ -138,7 +138,7 @@ def fetch_reviewed_url(
                 transport="urllib-http",
             )
     except (HTTPError, URLError, TimeoutError, OSError) as exc:
-        urllib_error = exc
+        http_urllib_error = exc
 
     try:
         return _curl_fetch(
@@ -149,5 +149,5 @@ def fetch_reviewed_url(
     except OSError as curl_error:
         raise OSError(
             "HTTP fetch failed via both transports; "
-            f"urllib={urllib_error}; curl={curl_error}"
-        ) from urllib_error
+            f"urllib={http_urllib_error}; curl={curl_error}"
+        ) from http_urllib_error
