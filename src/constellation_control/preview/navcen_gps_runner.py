@@ -64,6 +64,10 @@ def _source_format(source_format: Literal["yuma", "sem"]) -> Literal["gps-yuma",
     return "gps-yuma" if source_format == "yuma" else "gps-sem"
 
 
+def _lineage_source_type(source_format: Literal["yuma", "sem"]) -> Literal["gps_yuma", "gps_sem"]:
+    return "gps_yuma" if source_format == "yuma" else "gps_sem"
+
+
 def _authority(root: Path, request: NavcenGpsAuthorityRequest):
     url, text, raw_sha256 = fetch_navcen_gps_almanac(request.source_format)
     filename = Path(url).name
@@ -75,50 +79,91 @@ def _authority(root: Path, request: NavcenGpsAuthorityRequest):
         raise ValueError(f"unknown NAVCEN GPS PRN: {request.prn}")
 
     source = load_scenario(root / request.source_scenario_name)
-    satellite = next((item for item in source.constellation.satellites if item.satellite_id == request.satellite_id), None)
+    satellite = next(
+        (item for item in source.constellation.satellites if item.satellite_id == request.satellite_id),
+        None,
+    )
     if satellite is None:
-        raise ValueError(f"unknown scenario satellite: {request.satellite_id}")
+        raise ValueError(f"unknown satellite_id: {request.satellite_id}")
     if not source.orekit_sidecar_url:
-        raise ValueError("source scenario must define orekit_sidecar_url for authoritative NAVCEN GPS conversion")
-    client = OrekitGpsAlmanacMeanConversionClient(source.orekit_sidecar_url)
-    converted = client.convert(
-        source_name=filename,
-        source_text=text,
+        raise ValueError("selected scenario has no orekit_sidecar_url; GPS almanac authority is unavailable")
+
+    result = OrekitGpsAlmanacMeanConversionClient(source.orekit_sidecar_url).convert(
         source_format=_source_format(request.source_format),
+        source_name=url,
+        source_text=text,
         prn=request.prn,
-        target_epoch=source.epoch,
         frame=source.frame,
+        target_epoch=source.epoch,
         target_time_scale=source.time_scale,
         spacecraft=satellite.spacecraft,
         force_model=source.force_model,
     )
-    return source, satellite, converted, url, raw_sha256
+    if result.backend_metadata.get("gps_prn") != str(request.prn):
+        raise RuntimeError("Orekit NAVCEN GPS authority returned a different PRN")
+    return url, preview, record, source, satellite, result
 
 
 def preview_navcen_gps_authority(root: Path, request: NavcenGpsAuthorityRequest) -> dict[str, object]:
-    source, satellite, converted, url, raw_sha256 = _authority(root, request)
+    url, preview, _record, source, satellite, result = _authority(root, request)
     return {
+        "valid": True,
+        "provider": "USCG NAVCEN",
         "source_url": url,
-        "source_sha256": raw_sha256,
-        "source_format": request.source_format,
-        "prn": request.prn,
+        "source_format": preview.source_format.value,
+        "source_filename": preview.source_filename,
+        "source_sha256": preview.source_sha256,
         "source_scenario_id": source.scenario_id,
-        "template_satellite_id": satellite.satellite_id,
-        "converted": converted.model_dump(mode="json"),
+        "source_config_hash": source.config_hash(),
+        "satellite_id": satellite.satellite_id,
+        "prn": request.prn,
+        "records": len(preview.records),
+        "target_scenario_epoch": source.epoch.isoformat(),
+        "target_time_scale": source.time_scale.value,
+        "mean_orbit": result.mean_orbit.model_dump(mode="json"),
+        "backend_metadata": result.backend_metadata,
     }
 
 
+def _target(root: Path, name: str) -> Path:
+    if not name or Path(name).name != name or not name.lower().endswith((".yaml", ".yml")):
+        raise ValueError("target_scenario_name must be a new YAML file name without path components")
+    root = root.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    target = (root / name).resolve()
+    if target.parent != root:
+        raise ValueError("invalid target scenario path")
+    if target.exists():
+        raise ValueError("target scenario already exists; overwrite is forbidden")
+    return target
+
+
 def create_navcen_gps_scenario(root: Path, request: NavcenGpsCreateRequest) -> dict[str, object]:
-    source, satellite, converted, url, raw_sha256 = _authority(root, request)
-    new_satellite = satellite.model_copy(update={"mean_orbit": converted.mean_orbit})
-    twin = source.digital_twin or DigitalTwinConfig()
-    twin = twin.model_copy(
+    url, preview, _record, source, satellite, result = _authority(root, request)
+    if request.new_scenario_id == source.scenario_id:
+        raise ValueError("new_scenario_id must differ from parent scenario_id")
+    target = _target(root, request.target_scenario_name)
+    satellites = tuple(
+        item.model_copy(update={"mean_orbit": result.mean_orbit})
+        if item.satellite_id == request.satellite_id
+        else item
+        for item in source.constellation.satellites
+    )
+    constellation = source.constellation.model_copy(update={"satellites": satellites})
+    prior_twin = source.digital_twin or DigitalTwinConfig()
+    digital_twin = prior_twin.model_copy(
         update={
             "lineage": ScenarioLineage(
                 parent_scenario_id=source.scenario_id,
                 parent_config_hash=source.config_hash(),
                 transformation="gps_almanac_import",
                 random_seed=None,
+                source_type=_lineage_source_type(request.source_format),
+                source_name=url,
+                source_sha256=preview.source_sha256,
+                source_record_id=str(request.prn),
+                authority=result.backend_metadata.get("source_authority", "GPS-ALMANAC-OREKIT-GNSS")
+                + "; USCG NAVCEN direct online source",
             )
         }
     )
@@ -126,26 +171,29 @@ def create_navcen_gps_scenario(root: Path, request: NavcenGpsCreateRequest) -> d
         source.model_dump(mode="json")
         | {
             "scenario_id": request.new_scenario_id,
-            "constellation": {"satellites": [new_satellite.model_dump(mode="json")], "planes": []},
-            "digital_twin": twin.model_dump(mode="json"),
-            "maneuvers": [],
+            "constellation": constellation.model_dump(mode="json"),
+            "digital_twin": digital_twin.model_dump(mode="json"),
         }
     )
-    target = (root / request.target_scenario_name).resolve()
-    resolved_root = root.resolve()
-    if target.parent != resolved_root or target.exists() or target.suffix.lower() not in {".yaml", ".yml"}:
-        raise ValueError("target scenario must be a new YAML file in the scenario root")
-    target.write_text(yaml.safe_dump(child.model_dump(mode="json"), sort_keys=False, allow_unicode=True), encoding="utf-8")
+    target.write_text(
+        yaml.safe_dump(child.model_dump(mode="json"), sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
     return {
         "saved": True,
+        "runnable": True,
         "scenario_name": target.name,
         "scenario_id": child.scenario_id,
-        "source_url": url,
-        "source_sha256": raw_sha256,
-        "source_format": request.source_format,
+        "satellite_id": satellite.satellite_id,
         "prn": request.prn,
-        "template_satellite_id": satellite.satellite_id,
+        "parent_scenario_id": source.scenario_id,
+        "parent_config_hash": source.config_hash(),
         "child_config_hash": child.config_hash(),
+        "provider": "USCG NAVCEN",
+        "source_url": url,
+        "source_format": preview.source_format.value,
+        "source_sha256": preview.source_sha256,
+        "backend_metadata": result.backend_metadata,
     }
 
 
