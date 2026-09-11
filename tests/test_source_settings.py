@@ -20,7 +20,7 @@ from constellation_control.preview.source_settings_tab import SOURCE_SETTINGS_PA
 def test_settings_tab_exposes_urls_and_request_templates() -> None:
     assert 'data-tab-pane="settings"' in SOURCE_SETTINGS_PANE
     assert 'Настройки / Settings' in SOURCE_SETTINGS_PANE
-    assert 'Request template' in SOURCE_SETTINGS_PANE
+    assert 'Request template' in SOURCE_SETTINGS_TAB_SCRIPT
     assert "installSourceSettingsTab" in SOURCE_SETTINGS_TAB_SCRIPT
     assert "/api/settings/sources" in SOURCE_SETTINGS_TAB_SCRIPT
 
