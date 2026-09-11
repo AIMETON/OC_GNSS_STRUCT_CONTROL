@@ -14,6 +14,7 @@ from constellation_control.adapters.reviewed_http_fetch import fetch_reviewed_ur
 from constellation_control.application.run import load_scenario
 from constellation_control.domain.digital_twin import DigitalTwinConfig, ScenarioLineage
 from constellation_control.domain.models import ScenarioConfig
+from constellation_control.preview.source_settings import resolve_source_url
 
 NAVCEN_GPS_ALMANAC_URLS: dict[Literal["yuma", "sem"], str] = {
     "yuma": "https://www.navcen.uscg.gov/sites/default/files/gps/almanac/current_yuma.alm",
@@ -36,7 +37,8 @@ class NavcenGpsCreateRequest(NavcenGpsAuthorityRequest):
 def fetch_navcen_gps_almanac(
     source_format: Literal["yuma", "sem"], *, timeout_s: float = 20.0
 ) -> tuple[str, str, str]:
-    url = NAVCEN_GPS_ALMANAC_URLS[source_format]
+    default_url = NAVCEN_GPS_ALMANAC_URLS[source_format]
+    url = resolve_source_url(f"navcen_gps_{source_format}", default_url)
     response = fetch_reviewed_url(url, timeout_s=timeout_s)
     raw = response.raw
     if not raw:
@@ -77,91 +79,50 @@ def _authority(root: Path, request: NavcenGpsAuthorityRequest):
         raise ValueError(f"unknown NAVCEN GPS PRN: {request.prn}")
 
     source = load_scenario(root / request.source_scenario_name)
-    satellite = next(
-        (item for item in source.constellation.satellites if item.satellite_id == request.satellite_id),
-        None,
-    )
+    satellite = next((item for item in source.constellation.satellites if item.satellite_id == request.satellite_id), None)
     if satellite is None:
-        raise ValueError(f"unknown satellite_id: {request.satellite_id}")
+        raise ValueError(f"unknown scenario satellite: {request.satellite_id}")
     if not source.orekit_sidecar_url:
-        raise ValueError("selected scenario has no orekit_sidecar_url; GPS almanac authority is unavailable")
-
-    result = OrekitGpsAlmanacMeanConversionClient(source.orekit_sidecar_url).convert(
+        raise ValueError("source scenario must define orekit_sidecar_url for authoritative NAVCEN GPS conversion")
+    client = OrekitGpsAlmanacMeanConversionClient(source.orekit_sidecar_url)
+    converted = client.convert(
+        filename=filename,
+        content_text=text,
         source_format=_source_format(request.source_format),
-        source_name=url,
-        source_text=text,
         prn=request.prn,
-        frame=source.frame,
         target_epoch=source.epoch,
-        target_time_scale=source.time_scale,
+        frame=source.frame,
+        time_scale=source.time_scale,
         spacecraft=satellite.spacecraft,
         force_model=source.force_model,
     )
-    if result.backend_metadata.get("gps_prn") != str(request.prn):
-        raise RuntimeError("Orekit NAVCEN GPS authority returned a different PRN")
-    return url, preview, record, source, satellite, result
+    return source, satellite, converted, url, raw_sha256
 
 
 def preview_navcen_gps_authority(root: Path, request: NavcenGpsAuthorityRequest) -> dict[str, object]:
-    url, preview, _record, source, satellite, result = _authority(root, request)
+    source, satellite, converted, url, raw_sha256 = _authority(root, request)
     return {
-        "valid": True,
-        "provider": "USCG NAVCEN",
         "source_url": url,
-        "source_format": preview.source_format.value,
-        "source_filename": preview.source_filename,
-        "source_sha256": preview.source_sha256,
-        "source_scenario_id": source.scenario_id,
-        "source_config_hash": source.config_hash(),
-        "satellite_id": satellite.satellite_id,
+        "source_sha256": raw_sha256,
+        "source_format": request.source_format,
         "prn": request.prn,
-        "records": len(preview.records),
-        "target_scenario_epoch": source.epoch.isoformat(),
-        "target_time_scale": source.time_scale.value,
-        "mean_orbit": result.mean_orbit.model_dump(mode="json"),
-        "backend_metadata": result.backend_metadata,
+        "source_scenario_id": source.scenario_id,
+        "template_satellite_id": satellite.satellite_id,
+        "converted": converted.model_dump(mode="json"),
     }
 
 
-def _target(root: Path, name: str) -> Path:
-    if not name or Path(name).name != name or not name.lower().endswith((".yaml", ".yml")):
-        raise ValueError("target_scenario_name must be a new YAML file name without path components")
-    root = root.resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    target = (root / name).resolve()
-    if target.parent != root:
-        raise ValueError("invalid target scenario path")
-    if target.exists():
-        raise ValueError("target scenario already exists; overwrite is forbidden")
-    return target
-
-
-def create_navcen_gps_runner_scenario(root: Path, request: NavcenGpsCreateRequest) -> dict[str, object]:
-    url, preview, _record, source, satellite, result = _authority(root, request)
-    if request.new_scenario_id == source.scenario_id:
-        raise ValueError("new_scenario_id must differ from parent scenario_id")
-    target = _target(root, request.target_scenario_name)
-    satellites = tuple(
-        item.model_copy(update={"mean_orbit": result.mean_orbit})
-        if item.satellite_id == request.satellite_id
-        else item
-        for item in source.constellation.satellites
-    )
-    constellation = source.constellation.model_copy(update={"satellites": satellites})
-    prior_twin = source.digital_twin or DigitalTwinConfig()
-    digital_twin = prior_twin.model_copy(
+def create_navcen_gps_scenario(root: Path, request: NavcenGpsCreateRequest) -> dict[str, object]:
+    source, satellite, converted, url, raw_sha256 = _authority(root, request)
+    new_satellite = satellite.model_copy(update={"mean_orbit": converted.mean_orbit})
+    twin = source.digital_twin or DigitalTwinConfig()
+    twin = twin.model_copy(
         update={
             "lineage": ScenarioLineage(
                 parent_scenario_id=source.scenario_id,
                 parent_config_hash=source.config_hash(),
-                transformation="gps_almanac_import",
+                transformation=f"navcen_gps_{request.source_format}_prn_{request.prn}",
                 random_seed=None,
-                source_type=_lineage_source_type(request.source_format),
-                source_name=url,
-                source_sha256=preview.source_sha256,
-                source_record_id=str(request.prn),
-                authority=result.backend_metadata.get("source_authority", "GPS-ALMANAC-OREKIT-GNSS")
-                + "; USCG NAVCEN direct online source",
             )
         }
     )
@@ -169,70 +130,64 @@ def create_navcen_gps_runner_scenario(root: Path, request: NavcenGpsCreateReques
         source.model_dump(mode="json")
         | {
             "scenario_id": request.new_scenario_id,
-            "constellation": constellation.model_dump(mode="json"),
-            "digital_twin": digital_twin.model_dump(mode="json"),
+            "constellation": {"satellites": [new_satellite.model_dump(mode="json")], "planes": []},
+            "digital_twin": twin.model_dump(mode="json"),
+            "maneuvers": [],
         }
     )
-    target.write_text(
-        yaml.safe_dump(child.model_dump(mode="json"), sort_keys=False, allow_unicode=True),
-        encoding="utf-8",
-    )
+    target = (root / request.target_scenario_name).resolve()
+    resolved_root = root.resolve()
+    if target.parent != resolved_root or target.exists() or target.suffix.lower() not in {".yaml", ".yml"}:
+        raise ValueError("target scenario must be a new YAML file in the scenario root")
+    target.write_text(yaml.safe_dump(child.model_dump(mode="json"), sort_keys=False, allow_unicode=True), encoding="utf-8")
     return {
         "saved": True,
-        "runnable": True,
         "scenario_name": target.name,
         "scenario_id": child.scenario_id,
-        "satellite_id": satellite.satellite_id,
-        "prn": request.prn,
-        "parent_scenario_id": source.scenario_id,
-        "parent_config_hash": source.config_hash(),
-        "child_config_hash": child.config_hash(),
-        "provider": "USCG NAVCEN",
         "source_url": url,
-        "source_format": preview.source_format.value,
-        "source_sha256": preview.source_sha256,
-        "backend_metadata": result.backend_metadata,
+        "source_sha256": raw_sha256,
+        "source_format": request.source_format,
+        "prn": request.prn,
+        "template_satellite_id": satellite.satellite_id,
+        "child_config_hash": child.config_hash(),
     }
+
+
+def install_navcen_gps_runner_routes(app: FastAPI, scenario_root: Path) -> None:
+    @app.post("/api/navcen-gps-runner/authority")
+    def navcen_authority(request: NavcenGpsAuthorityRequest) -> dict[str, object]:
+        try:
+            return preview_navcen_gps_authority(scenario_root, request)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/navcen-gps-runner/create")
+    def navcen_create(request: NavcenGpsCreateRequest) -> dict[str, object]:
+        try:
+            return create_navcen_gps_scenario(scenario_root, request)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 NAVCEN_GPS_RUNNER_CARD = r"""
 <div class="card" id="navcenGpsRunnerCard">
-  <h3>NAVCEN GPS YUMA/SEM → runnable scenario</h3>
-  <p class="hint">Прямой online authority source USCG NAVCEN: current YUMA/SEM → штатный Orekit GPS almanac parser/GNSS propagator → DSST mean → новый ScenarioConfig. HTML/error responses блокируются; исходный файл фиксируется SHA-256. При сетевой ошибке Python-клиента автоматически пробуется системный curl/curl.exe.</p>
-  <div class="grid">
-    <label>Формат / Format <select id="navcenGpsFormat"><option value="yuma">Current YUMA</option><option value="sem">Current SEM</option></select></label>
-    <label>PRN <input id="navcenGpsPrn" type="number" min="1" max="63" value="1"></label>
-  </div>
-  <label>КА сценария / Scenario satellite <select id="navcenGpsSat"></select></label>
-  <button onclick="previewNavcenGpsAuthority()">Скачать и проверить через Orekit / Fetch + preview</button>
-  <pre id="navcenGpsPreview"></pre>
-  <label>Новый scenario_id <input id="navcenGpsScenarioId" type="text" placeholder="navcen-gps-derived-01"></label>
-  <label>Новый YAML <input id="navcenGpsScenarioFile" type="text" placeholder="navcen-gps-derived-01.yaml"></label>
-  <button onclick="createNavcenGpsScenario()">Собрать runnable scenario / Build runnable scenario</button>
-  <div id="navcenGpsStatus" class="status"></div>
+<h3>NAVCEN GPS YUMA/SEM → runnable scenario</h3>
+<p class="hint">Прямой online authority source USCG NAVCEN: current YUMA/SEM → штатный Orekit GPS almanac parser/GNSS propagator → DSST mean → новый ScenarioConfig. URL берётся из меню Settings; HTML/error responses блокируют исходный файл; фиксируется SHA-256.</p>
+<label>Формат / Format<select id="navcenGpsFormat"><option value="yuma">Current YUMA</option><option value="sem">Current SEM</option></select></label>
+<label>PRN<input id="navcenGpsPrn" type="number" min="1" max="63" value="1"></label>
+<label>КА сценария / Scenario satellite<select id="navcenGpsSat"></select></label>
+<button type="button" onclick="navcenGpsPreview()">Скачать и проверить через Orekit / Fetch + preview</button>
+<pre id="navcenGpsPreview"></pre>
+<label>Новый scenario_id<input id="navcenGpsScenarioId" value="navcen-gps-derived-01"></label>
+<label>Новый YAML<input id="navcenGpsFile" value="navcen-gps-derived-01.yaml"></label>
+<button type="button" onclick="navcenGpsCreate()">Собрать runnable scenario / Build runnable scenario</button>
+<div id="navcenGpsStatus" class="status"></div>
 </div>
 """
 
 NAVCEN_GPS_RUNNER_SCRIPT = r"""
-function syncNavcenGpsSatellites(){if(!current)return;const sats=((current.normalized||current).constellation||{}).satellites||[];navcenGpsSat.replaceChildren(...sats.map(s=>{const o=document.createElement('option');o.value=s.satellite_id;o.textContent=s.satellite_id;return o;}));}
-function navcenGpsStatusSet(t,k=''){navcenGpsStatus.textContent=t;navcenGpsStatus.className='status '+k;}
-function navcenGpsPayload(){if(!navcenGpsSat.value)throw new Error('scenario satellite is required');return {source_format:navcenGpsFormat.value,source_scenario_name:scenario.value,satellite_id:navcenGpsSat.value,prn:Number(navcenGpsPrn.value)};}
-async function previewNavcenGpsAuthority(){let p;try{p=navcenGpsPayload();}catch(e){navcenGpsStatusSet(String(e.message||e),'danger');return;}navcenGpsStatusSet('NAVCEN download → Orekit authority…');const r=await fetch('/api/navcen-gps-runner/authority',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});const d=await r.json();if(!r.ok){navcenGpsStatusSet(d.detail||'NAVCEN GPS authority failed','danger');return;}navcenGpsPreview.textContent=JSON.stringify(d,null,2);navcenGpsStatusSet('AUTHORITY VALID: PRN='+d.prn+'; records='+d.records+'; sha256='+d.source_sha256,'ok');}
-async function createNavcenGpsScenario(){let p;try{p=navcenGpsPayload();}catch(e){navcenGpsStatusSet(String(e.message||e),'danger');return;}p={...p,new_scenario_id:navcenGpsScenarioId.value.trim(),target_scenario_name:navcenGpsScenarioFile.value.trim()};if(!p.new_scenario_id||!p.target_scenario_name){navcenGpsStatusSet('Укажите новый scenario_id и YAML','danger');return;}navcenGpsStatusSet('NAVCEN → Orekit → runnable scenario…');const r=await fetch('/api/navcen-gps-runner/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});const d=await r.json();if(!r.ok){navcenGpsStatusSet(d.detail||'Build failed','danger');return;}const c=await fetch('/api/scenarios');catalog=await c.json();scenario.replaceChildren(...catalog.scenarios.map(x=>{const o=document.createElement('option');o.value=x;o.textContent=x;return o;}));scenario.value=d.scenario_name;await loadScenario();navcenGpsStatusSet('RUNNABLE: '+d.scenario_name+'; '+d.child_config_hash,'ok');}
+function syncNavcenGpsSatellites(){if(typeof current==='undefined'||!current)return;navcenGpsSat.replaceChildren(...current.satellites.map(x=>new Option(x.satellite_id,x.satellite_id)));}
+async function navcenGpsPayload(){return {source_format:navcenGpsFormat.value,source_scenario_name:scenario.value,satellite_id:navcenGpsSat.value,prn:Number(navcenGpsPrn.value)};}
+async function navcenGpsPreview(){navcenGpsStatus.textContent='Loading NAVCEN…';try{const r=await fetch('/api/navcen-gps-runner/authority',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(await navcenGpsPayload())});const d=await r.json();if(!r.ok)throw new Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail||d));navcenGpsPreview.textContent=JSON.stringify(d,null,2);navcenGpsStatus.textContent='READY';navcenGpsStatus.className='status ok';}catch(e){navcenGpsStatus.textContent=String(e);navcenGpsStatus.className='status danger';}}
+async function navcenGpsCreate(){navcenGpsStatus.textContent='Building…';try{const p=await navcenGpsPayload();p.new_scenario_id=navcenGpsScenarioId.value.trim();p.target_scenario_name=navcenGpsFile.value.trim();const r=await fetch('/api/navcen-gps-runner/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});const d=await r.json();if(!r.ok)throw new Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail||d));const c=await fetch('/api/scenarios');catalog=await c.json();scenario.replaceChildren(...catalog.scenarios.map(x=>new Option(x,x)));scenario.value=d.scenario_name;await loadScenario();navcenGpsStatus.textContent='RUNNABLE: '+d.scenario_name;navcenGpsStatus.className='status ok';}catch(e){navcenGpsStatus.textContent=String(e);navcenGpsStatus.className='status danger';}}
 """
-
-
-def install_navcen_gps_runner_routes(app: FastAPI, scenario_root: Path = Path("scenarios")) -> None:
-    @app.post("/api/navcen-gps-runner/authority")
-    def authority(request: NavcenGpsAuthorityRequest) -> dict[str, object]:
-        try:
-            return preview_navcen_gps_authority(scenario_root, request)
-        except (ValueError, TypeError, RuntimeError, OSError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    @app.post("/api/navcen-gps-runner/create")
-    def create(request: NavcenGpsCreateRequest) -> dict[str, object]:
-        try:
-            return create_navcen_gps_runner_scenario(scenario_root, request)
-        except (ValueError, TypeError, RuntimeError, OSError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
