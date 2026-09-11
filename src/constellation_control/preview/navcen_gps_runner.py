@@ -64,10 +64,6 @@ def _source_format(source_format: Literal["yuma", "sem"]) -> Literal["gps-yuma",
     return "gps-yuma" if source_format == "yuma" else "gps-sem"
 
 
-def _lineage_source_type(source_format: Literal["yuma", "sem"]) -> Literal["gps_yuma", "gps_sem"]:
-    return "gps_yuma" if source_format == "yuma" else "gps_sem"
-
-
 def _authority(root: Path, request: NavcenGpsAuthorityRequest):
     url, text, raw_sha256 = fetch_navcen_gps_almanac(request.source_format)
     filename = Path(url).name
@@ -86,13 +82,13 @@ def _authority(root: Path, request: NavcenGpsAuthorityRequest):
         raise ValueError("source scenario must define orekit_sidecar_url for authoritative NAVCEN GPS conversion")
     client = OrekitGpsAlmanacMeanConversionClient(source.orekit_sidecar_url)
     converted = client.convert(
-        filename=filename,
-        content_text=text,
+        source_name=filename,
+        source_text=text,
         source_format=_source_format(request.source_format),
         prn=request.prn,
         target_epoch=source.epoch,
         frame=source.frame,
-        time_scale=source.time_scale,
+        target_time_scale=source.time_scale,
         spacecraft=satellite.spacecraft,
         force_model=source.force_model,
     )
@@ -121,7 +117,7 @@ def create_navcen_gps_scenario(root: Path, request: NavcenGpsCreateRequest) -> d
             "lineage": ScenarioLineage(
                 parent_scenario_id=source.scenario_id,
                 parent_config_hash=source.config_hash(),
-                transformation=f"navcen_gps_{request.source_format}_prn_{request.prn}",
+                transformation="gps_almanac_import",
                 random_seed=None,
             )
         }
