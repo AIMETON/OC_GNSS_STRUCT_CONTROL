@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -38,31 +39,74 @@ def test_settings_persist_and_resolve_template(tmp_path: Path, monkeypatch) -> N
     assert resolve_source_url("navcen_gps_yuma", "https://default.invalid", prn=7) == "https://mirror.example.test/gps/7.alm"
 
 
+def test_disabled_source_does_not_fall_back_hidden(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("OC_GNSS_SOURCE_SETTINGS", str(tmp_path / "source_endpoints.json"))
+    document = DEFAULT_SOURCE_SETTINGS.model_copy(deep=True)
+    navcen = next(item for item in document.sources if item.source_id == "navcen_gps_yuma")
+    navcen.enabled = False
+    save_source_settings(document)
+    with pytest.raises(ValueError, match="source navcen_gps_yuma is disabled"):
+        resolve_source_url("navcen_gps_yuma", "https://hidden-fallback.invalid")
+
+
 def test_iac_ftp_archive_default_is_operator_configurable(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("OC_GNSS_SOURCE_SETTINGS", str(tmp_path / "source_endpoints.json"))
     archive = next(item for item in DEFAULT_SOURCE_SETTINGS.sources if item.source_id == "iac_ftp_archive")
     assert archive.base_url == "ftp://ftp.glonass-iac.ru"
     assert "{directory}" in archive.request_template
-    assert "anonymous" in archive.notes.lower()
+    assert "archive_discovery" in archive.capabilities
+    assert "broadcast_rinex_nav" in archive.capabilities
     assert resolve_source_url("iac_ftp_archive", "ftp://invalid", directory="MCC") == "ftp://ftp.glonass-iac.ru/MCC/"
+
+
+def test_fcnd_is_explicit_russian_gnss_source() -> None:
+    fcnd = next(item for item in DEFAULT_SOURCE_SETTINGS.sources if item.source_id == "fcnd_api")
+    assert fcnd.base_url == "https://fcnd.ru"
+    assert set(fcnd.systems) == {"GLONASS", "GPS"}
+    assert "gnss_data_api" in fcnd.capabilities
+    assert "broadcast_rinex_nav" in fcnd.capabilities
 
 
 def test_auto_source_selection_preserves_operator_order(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("OC_GNSS_SOURCE_SETTINGS", str(tmp_path / "source_endpoints.json"))
     document = DEFAULT_SOURCE_SETTINGS.model_copy(deep=True)
     document.selection["GLONASS"].mode = "auto"
-    document.selection["GLONASS"].auto_order = ["iac_ftp_archive", "igs_whu", "igs_bkg"]
+    document.selection["GLONASS"].auto_order = ["iac_ftp_archive", "fcnd_api", "igs_whu", "igs_bkg"]
     save_source_settings(document)
-    assert [item.source_id for item in selected_source_sequence("GLONASS")] == [
-        "iac_ftp_archive",
-        "igs_whu",
-        "igs_bkg",
-        "iac_glonass",
-    ]
     assert [item.source_id for item in selected_source_sequence("GLONASS", capability="broadcast_rinex_nav")] == [
+        "iac_ftp_archive",
+        "fcnd_api",
         "igs_whu",
         "igs_bkg",
     ]
+
+
+def test_v2_settings_migrate_fcnd_without_losing_operator_values(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "source_endpoints.json"
+    monkeypatch.setenv("OC_GNSS_SOURCE_SETTINGS", str(path))
+    old = DEFAULT_SOURCE_SETTINGS.model_copy(deep=True)
+    old.version = 2
+    old.sources = [item for item in old.sources if item.source_id != "fcnd_api"]
+    bkg = next(item for item in old.sources if item.source_id == "igs_bkg")
+    bkg.base_url = "https://operator.example.test/brdc"
+    old.selection["GLONASS"].auto_order = ["iac_glonass", "iac_ftp_archive", "igs_bkg", "igs_whu"]
+    old.selection["GPS"].mode = "manual"
+    old.selection["GPS"].selected_source_id = "navcen_gps_sem"
+    path.write_text(old.model_dump_json(indent=2), encoding="utf-8")
+
+    upgraded = load_source_settings()
+    assert upgraded.version == 3
+    assert any(item.source_id == "fcnd_api" for item in upgraded.sources)
+    assert next(item for item in upgraded.sources if item.source_id == "igs_bkg").base_url == "https://operator.example.test/brdc"
+    assert upgraded.selection["GLONASS"].auto_order == [
+        "iac_glonass",
+        "iac_ftp_archive",
+        "fcnd_api",
+        "igs_bkg",
+        "igs_whu",
+    ]
+    assert upgraded.selection["GPS"].mode == "manual"
+    assert upgraded.selection["GPS"].selected_source_id == "navcen_gps_sem"
 
 
 def test_manual_source_selection_is_fail_closed(tmp_path: Path, monkeypatch) -> None:
@@ -84,8 +128,11 @@ def test_settings_api_round_trip(tmp_path: Path, monkeypatch) -> None:
     initial = client.get("/api/settings/sources")
     assert initial.status_code == 200
     payload = initial.json()
+    assert payload["version"] == 3
+    assert len(payload["sources"]) == 9
     assert any(item["source_id"] == "igs_whu" for item in payload["sources"])
     assert any(item["source_id"] == "iac_ftp_archive" for item in payload["sources"])
+    assert any(item["source_id"] == "fcnd_api" for item in payload["sources"])
     assert payload["selection"]["GLONASS"]["mode"] == "auto"
     payload["sources"][0]["base_url"] = "https://example.test/nav"
     payload["selection"]["GLONASS"]["mode"] = "manual"
@@ -95,3 +142,12 @@ def test_settings_api_round_trip(tmp_path: Path, monkeypatch) -> None:
     current = client.get("/api/settings/sources").json()
     assert current["sources"][0]["base_url"] == "https://example.test/nav"
     assert current["selection"]["GLONASS"]["selected_source_id"] == "igs_whu"
+
+
+def test_saved_settings_file_is_valid_json(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "source_endpoints.json"
+    monkeypatch.setenv("OC_GNSS_SOURCE_SETTINGS", str(path))
+    save_source_settings(DEFAULT_SOURCE_SETTINGS.model_copy(deep=True))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["version"] == 3
+    assert len(payload["sources"]) == 9
