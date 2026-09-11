@@ -85,6 +85,19 @@ DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
             request_template="{base_url}/glonass/ephemeris/ephemeris_json.php",
             notes="Operator-configurable IAC authority endpoint.",
         ),
+        SourceEndpointSetting(
+            source_id="iac_ftp_archive",
+            label="IAC GLONASS FTP archive",
+            base_url="ftp://ftp.glonass-iac.ru",
+            request_template="{base_url}/{directory}/",
+            notes=(
+                "Official Applied Consumer Centre FTP archive. Anonymous FTP on port 21: login anonymous, "
+                "password anonymous. Relevant sections include MCC (IAC analysis products, daily GLONASS/GPS "
+                "almanacs, generalized onboard ephemerides), IGS, NAVCEN, IERS, FAF, GENERAL, REPORTS. "
+                "Use directory=MCC for the primary Russian GLONASS archive; exact product filenames are discovered "
+                "at runtime and are not hard-coded."
+            ),
+        ),
     ]
 )
 
@@ -160,7 +173,7 @@ def install_source_settings_routes(app: FastAPI) -> None:
 SOURCE_SETTINGS_CARD = r"""
 <div class="card" id="sourceSettingsCard">
   <h3>Источники данных / Data source settings</h3>
-  <p class="hint">URL и шаблоны запросов хранятся локально и переживают перезапуск Preview. Подстановки в шаблонах: {base_url}, {year}, {yy}, {doy}, {system}, {system_suffix}, {prn}, {slot}. Ошибка шаблона блокирует запрос явно.</p>
+  <p class="hint">URL и шаблоны запросов хранятся локально и переживают перезапуск Preview. Подстановки в шаблонах: {base_url}, {year}, {yy}, {doy}, {system}, {system_suffix}, {prn}, {slot}, {directory}. Ошибка шаблона блокирует запрос явно.</p>
   <div id="sourceSettingsPath" class="hint"></div>
   <div id="sourceSettingsRows"></div>
   <div class="grid">
