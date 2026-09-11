@@ -8,6 +8,7 @@ OPERATOR_TABS_CARD = r"""
   <button type="button" data-tab="results" onclick="showOperatorTab('results')">Результаты / Results</button>
   <button type="button" data-tab="expert" onclick="showOperatorTab('expert')">Эксперт / Expert</button>
 </nav>
+<div id="operatorRuntimeStatus" class="status" style="display:none"></div>
 
 <div class="card active-run-card" id="activeRunConfigurationCard">
   <h3>Активная расчётная конфигурация / Active Run Configuration</h3>
@@ -120,6 +121,8 @@ OPERATOR_TABS_STYLE = r"""
 
 OPERATOR_TABS_SCRIPT = r"""
 function operatorById(id){return document.getElementById(id);}
+function operatorRuntimeError(value){const e=operatorById('operatorRuntimeStatus');if(!e)return;const text=String(value&&value.message?value.message:value||'Unknown UI error');e.textContent='UI ERROR: '+text;e.className='status danger';e.style.display='block';}
+function operatorClearRuntimeError(){const e=operatorById('operatorRuntimeStatus');if(e){e.textContent='';e.style.display='none';}}
 function operatorText(id,value){const e=operatorById(id);if(e)e.textContent=(value===undefined||value===null||value==='')?'—':String(value);}
 function operatorSelectValue(id){const e=operatorById(id);return e&&e.value?e.value:'—';}
 function normalizedOperatorTab(name){return ({inputs:'mission',design:'experiments',robustness:'experiments'}[name]||name);}
@@ -170,9 +173,9 @@ function splitConstellationEditorLegacyGravity(){
   if(expert.childNodes.length)card.after(expert);
 }
 function missionModeText(mode){
-  if(mode==='manual')return 'РУЧНОЙ: никаких подстановок. Вы сами выбираете source, template и каждое инженерно значимое действие; Expert всегда доступен.';
-  if(mode==='auto')return 'АВТО: программа выполняет только разрешённые однозначные шаги и показывает provenance. Для baseline активный ScenarioConfig используется как modelling authority; неоднозначность или несовместимость блокирует автоматическую цепочку.';
-  return 'ПОЛУАВТО: программа предлагает и подставляет безопасные значения, но инженер подтверждает значимые переходы. Это рекомендуемый рабочий эшелон.';
+  if(mode==='manual')return 'РУЧНОЙ: никаких подстановок. Вы сами выбираете source, modelling authority и каждое инженерно значимое действие; Expert всегда доступен.';
+  if(mode==='auto')return 'АВТО: выполняются только однозначные шаги. Modelling authority никогда не берётся скрыто из активного сценария: её надо выбрать явно; неоднозначность блокирует цепочку.';
+  return 'ПОЛУАВТО: программа подготавливает данные и следующий шаг, но modelling authority и инженерно значимые переходы подтверждаются явно.';
 }
 function setMissionEchelon(mode){
   if(!['manual','assisted','auto'].includes(mode))mode='assisted';
@@ -191,22 +194,25 @@ function missionRefreshNextStep(text){
 function missionUseCurrentScenario(){showOperatorTab('scenarios');const e=operatorById('scenarioSummaryCard');if(e)e.scrollIntoView({behavior:'smooth',block:'start'});}
 function missionPrepareVariant(){showOperatorTab('scenarios');if(typeof syncScenarioVariant==='function')syncScenarioVariant();const e=operatorById('scenarioVariantCard');if(e)e.scrollIntoView({behavior:'smooth',block:'start'});}
 async function missionPrepareBaseline(){
-  const date=(operatorById('missionDate')||{}).value||'';
-  const system=(operatorById('missionSystem')||{}).value||'GLONASS';
-  if(!date){missionRefreshNextStep('Укажите дату baseline.');return;}
-  if(typeof igsStartDate!=='undefined')igsStartDate.value=date;
-  if(typeof igsSystem!=='undefined')igsSystem.value=system;
-  const mode=localStorage.getItem('mission-echelon')||'assisted';
-  const selected=typeof scenario!=='undefined'&&scenario&&scenario.value?scenario.value:'';
-  if(mode!=='manual'&&typeof igsTemplateScenario!=='undefined'&&selected)igsTemplateScenario.value=selected;
-  const card=operatorById('igsConstellationCard');if(card)card.scrollIntoView({behavior:'smooth',block:'start'});
-  if(mode==='manual'){missionRefreshNextStep('Ручной эшелон: дата и система подготовлены. Выберите modelling template и при необходимости управляйте intake/conversion раздельно.');return;}
-  if(mode==='assisted'){missionRefreshNextStep(selected?'Полуавтоматический эшелон: активный сценарий предложен как modelling template. Проверьте его и нажмите «Создать baseline».':'Полуавтоматический эшелон: выберите modelling template и нажмите «Создать baseline».');return;}
-  if(!selected){missionRefreshNextStep('AUTO остановлен: нет активного ScenarioConfig для modelling authority. Выберите базовую модель или перейдите в ручной/полуавтоматический эшелон.');return;}
-  missionRefreshNextStep('AUTO: IGS intake → cache → '+selected+' authority → derived ScenarioConfig…');
-  if(typeof createIgsBaseline!=='function'){missionRefreshNextStep('AUTO остановлен: IGS baseline workflow недоступен.');return;}
-  const ok=await createIgsBaseline();
-  missionRefreshNextStep(ok?'AUTO baseline готов. Следующий шаг: создать вариант или перейти к экспериментам.':'AUTO остановлен. Подробности показаны в baseline-карточке.');
+  try{
+    operatorClearRuntimeError();
+    const date=(operatorById('missionDate')||{}).value||'';
+    const system=(operatorById('missionSystem')||{}).value||'GLONASS';
+    if(!date){missionRefreshNextStep('Укажите дату baseline.');return false;}
+    if(typeof igsStartDate!=='undefined')igsStartDate.value=date;
+    if(typeof igsSystem!=='undefined')igsSystem.value=system;
+    const mode=localStorage.getItem('mission-echelon')||'assisted';
+    const authority=(typeof igsTemplateScenario!=='undefined'&&igsTemplateScenario)?igsTemplateScenario.value:'';
+    const card=operatorById('igsConstellationCard');if(card)card.scrollIntoView({behavior:'smooth',block:'start'});
+    if(mode==='manual'){missionRefreshNextStep('Ручной эшелон: дата и система подготовлены. Явно выберите modelling authority и управляйте intake/conversion раздельно.');return true;}
+    if(mode==='assisted'){missionRefreshNextStep(authority?'Полуавтоматический эшелон: modelling authority уже выбрана. Проверьте её и нажмите «Создать baseline».':'Полуавтоматический эшелон: данные подготовлены. Теперь явно выберите modelling authority и нажмите «Создать baseline».');return true;}
+    if(!authority){missionRefreshNextStep('AUTO остановлен: modelling authority не выбрана явно. Выберите её в baseline-карточке.');return false;}
+    missionRefreshNextStep('AUTO: IGS intake → cache → '+authority+' authority → derived ScenarioConfig…');
+    if(typeof createIgsBaseline!=='function'){missionRefreshNextStep('AUTO остановлен: IGS baseline workflow недоступен.');return false;}
+    const ok=await createIgsBaseline();
+    missionRefreshNextStep(ok?'AUTO baseline готов. Следующий шаг: создать вариант или перейти к экспериментам.':'AUTO остановлен. Подробности показаны в baseline-карточке.');
+    return !!ok;
+  }catch(e){operatorRuntimeError(e);missionRefreshNextStep('Baseline остановлен из-за ошибки интерфейса. Подробности показаны выше.');return false;}
 }
 function installMissionWorkspace(){
   const objective=operatorById('missionObjective');
@@ -219,7 +225,7 @@ function installMissionWorkspace(){
   missionRefreshNextStep();
 }
 function arrangeOperatorTabs(){
-  const section=document.querySelector('main section');if(!section)return;
+  const section=document.querySelector('main section');if(!section)throw new Error('operator workspace root section is missing');
   splitWorkflowCard();splitConstellationEditorLegacyGravity();
   ['operatorTabMission','operatorTabScenarios','operatorTabExperiments','operatorTabResults','operatorTabExpert'].forEach(id=>{const pane=operatorById(id);if(pane&&pane.parentElement!==section)section.appendChild(pane);});
 
@@ -245,16 +251,26 @@ function arrangeOperatorTabs(){
   const active=normalizedOperatorTab(localStorage.getItem('operator-tab')||'mission');showOperatorTab(active);
 }
 function showOperatorTab(name){
-  name=normalizedOperatorTab(name);
-  document.querySelectorAll('[data-tab-pane]').forEach(p=>p.classList.toggle('active',p.dataset.tabPane===name));
-  document.querySelectorAll('#operatorTabs [data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));
-  localStorage.setItem('operator-tab',name);activeRunRefresh();missionRefreshNextStep();
+  try{
+    operatorClearRuntimeError();
+    name=normalizedOperatorTab(name);
+    const panes=Array.from(document.querySelectorAll('[data-tab-pane]'));
+    if(!panes.some(p=>p.dataset.tabPane===name))throw new Error('unknown operator tab: '+name);
+    panes.forEach(p=>p.classList.toggle('active',p.dataset.tabPane===name));
+    document.querySelectorAll('#operatorTabs [data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));
+    localStorage.setItem('operator-tab',name);activeRunRefresh();missionRefreshNextStep();
+    return true;
+  }catch(e){operatorRuntimeError(e);return false;}
 }
 function installActiveRunListeners(){
-  ['scenario','designScreening','designValidation','designConfig','robustnessValidation','robustnessConfig'].forEach(id=>{const e=operatorById(id);if(e)e.addEventListener('change',()=>{activeRunRefresh();missionRefreshNextStep();});});
+  ['scenario','designScreening','designValidation','designConfig','robustnessValidation','robustnessConfig'].forEach(id=>{const e=operatorById(id);if(e)e.addEventListener('change',()=>{try{activeRunRefresh();missionRefreshNextStep();}catch(err){operatorRuntimeError(err);}});});
+}
+function installOperatorRuntimeGuard(){
+  window.addEventListener('error',event=>operatorRuntimeError(event.error||event.message));
+  window.addEventListener('unhandledrejection',event=>{operatorRuntimeError(event.reason||'Unhandled promise rejection');event.preventDefault();});
 }
 const operatorOriginalLoadScenario=loadScenario;
-loadScenario=async function(){await operatorOriginalLoadScenario();activeRunRefresh();missionRefreshNextStep();if(typeof syncScenarioVariant==='function')syncScenarioVariant();};
+loadScenario=async function(){try{await operatorOriginalLoadScenario();activeRunRefresh();missionRefreshNextStep();if(typeof syncScenarioVariant==='function')syncScenarioVariant();if(typeof syncIacGloConstAuthority==='function')syncIacGloConstAuthority();return true;}catch(e){operatorRuntimeError(e);throw e;}};
 const operatorTabsBootstrap=bootstrap;
-bootstrap=async function(){await operatorTabsBootstrap();arrangeOperatorTabs();installActiveRunListeners();installMissionWorkspace();activeRunRefresh();};
+bootstrap=async function(){installOperatorRuntimeGuard();try{await operatorTabsBootstrap();arrangeOperatorTabs();installActiveRunListeners();installMissionWorkspace();activeRunRefresh();}catch(e){operatorRuntimeError(e);}};
 """
