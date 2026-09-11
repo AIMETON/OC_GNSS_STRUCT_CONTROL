@@ -57,8 +57,11 @@ def test_bkg_glonass_download_is_cached_with_hashes(tmp_path: Path, monkeypatch)
     assert cached_again.transport == "cache"
 
 
-def test_preview_exposes_glonass_rinex_runner() -> None:
+def test_preview_exposes_source_driven_glonass_rinex_runner() -> None:
     page = render_preview_page_for_test()
     assert 'id="glonassRinexRunnerCard"' in page
+    assert 'id="gloRinexAuthority"' in page
+    assert "/api/glonass-rinex-runner/probe" in page
     assert "/api/glonass-rinex-runner/create" in page
-    assert "IGS/BKG RINEX NAV" in page
+    assert "RINEX NAV → GLONASS ScenarioConfig" in page
+    assert "Выберите modelling authority явно" in page
