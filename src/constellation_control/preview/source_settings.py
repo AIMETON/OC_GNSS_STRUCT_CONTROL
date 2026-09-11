@@ -48,12 +48,13 @@ class SourceSelectionPolicy(BaseModel):
 
 
 class SourceSettingsDocument(BaseModel):
-    version: int = 2
+    version: int = 3
     sources: list[SourceEndpointSetting]
     selection: dict[GNSSSystem, SourceSelectionPolicy] = Field(default_factory=dict)
 
 
 DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
+    version=3,
     sources=[
         SourceEndpointSetting(
             source_id="igs_bkg",
@@ -112,7 +113,7 @@ DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
             label="IAC GLONASS ephemeris table",
             base_url="https://glonass-iac.ru",
             request_template="{base_url}/glonass/ephemeris/ephemeris_json.php",
-            notes="Operator-configurable IAC authority endpoint.",
+            notes="Qualified IAC live GLONASS ephemeris/almanac table.",
             systems=["GLONASS"],
             capabilities=["glonass_ephemeris_table"],
         ),
@@ -122,24 +123,34 @@ DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
             base_url="ftp://ftp.glonass-iac.ru",
             request_template="{base_url}/{directory}/",
             notes=(
-                "Official Applied Consumer Centre FTP archive. Anonymous FTP on port 21: login anonymous, "
-                "password anonymous. Relevant sections include MCC (IAC analysis products, daily GLONASS/GPS "
-                "almanacs, generalized onboard ephemerides), IGS, NAVCEN, IERS, FAF, GENERAL, REPORTS. "
-                "Use directory=MCC for the primary Russian GLONASS archive; exact product filenames are discovered "
-                "at runtime and are not hard-coded."
+                "Official Applied Consumer Centre FTP archive. Anonymous FTP on port 21. "
+                "MCC/IGS products are discovered at runtime and accepted as broadcast RINEX NAV only "
+                "after strict format/system validation."
             ),
             systems=["GLONASS", "GPS"],
-            capabilities=["archive_discovery"],
+            capabilities=["archive_discovery", "broadcast_rinex_nav"],
+        ),
+        SourceEndpointSetting(
+            source_id="fcnd_api",
+            label="FCND Russian GNSS data API",
+            base_url="https://fcnd.ru",
+            request_template="{base_url}/api/getData/",
+            notes=(
+                "Russian Federal Coordinate Network Data Centre API. The runtime queries documented getData "
+                "catalogue/datafile endpoints and accepts a candidate only after strict RINEX NAV validation."
+            ),
+            systems=["GLONASS", "GPS"],
+            capabilities=["gnss_data_api", "broadcast_rinex_nav"],
         ),
     ],
     selection={
         "GLONASS": SourceSelectionPolicy(
             mode="auto",
-            auto_order=["iac_glonass", "iac_ftp_archive", "igs_bkg", "igs_whu"],
+            auto_order=["iac_glonass", "iac_ftp_archive", "fcnd_api", "igs_bkg", "igs_whu"],
         ),
         "GPS": SourceSelectionPolicy(
             mode="auto",
-            auto_order=["navcen_gps_yuma", "navcen_gps_sem", "igs_bkg", "igs_whu"],
+            auto_order=["fcnd_api", "navcen_gps_yuma", "navcen_gps_sem", "igs_bkg", "igs_whu"],
         ),
         "Galileo": SourceSelectionPolicy(
             mode="auto",
@@ -155,11 +166,39 @@ def settings_path() -> Path:
     return Path(configured) if configured else _DEFAULT_SETTINGS_PATH
 
 
+def _merge_auto_order(system: GNSSSystem, current: list[str], desired: list[str]) -> list[str]:
+    result: list[str] = []
+    for source_id in current:
+        if source_id and source_id not in result:
+            result.append(source_id)
+    for source_id in desired:
+        if source_id in result:
+            continue
+        if source_id == "fcnd_api" and system == "GLONASS" and "iac_ftp_archive" in result:
+            result.insert(result.index("iac_ftp_archive") + 1, source_id)
+        elif source_id == "fcnd_api" and system == "GPS":
+            result.insert(0, source_id)
+        else:
+            result.append(source_id)
+    return result
+
+
 def _upgrade_document(document: SourceSettingsDocument) -> SourceSettingsDocument:
-    if document.selection:
-        return document
-    upgraded = DEFAULT_SOURCE_SETTINGS.model_copy(deep=True)
-    upgraded.sources = document.sources
+    upgraded = document.model_copy(deep=True)
+    existing_ids = {item.source_id for item in upgraded.sources}
+    for default_source in DEFAULT_SOURCE_SETTINGS.sources:
+        if default_source.source_id not in existing_ids:
+            upgraded.sources.append(default_source.model_copy(deep=True))
+            existing_ids.add(default_source.source_id)
+
+    for system, default_policy in DEFAULT_SOURCE_SETTINGS.selection.items():
+        policy = upgraded.selection.get(system)
+        if policy is None:
+            upgraded.selection[system] = default_policy.model_copy(deep=True)
+            continue
+        if policy.mode == "auto":
+            policy.auto_order = _merge_auto_order(system, policy.auto_order, default_policy.auto_order)
+    upgraded.version = 3
     return upgraded
 
 
@@ -175,6 +214,7 @@ def load_source_settings() -> SourceSettingsDocument:
 
 
 def save_source_settings(document: SourceSettingsDocument) -> Path:
+    document = _upgrade_document(document)
     path = settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -192,8 +232,10 @@ def source_setting(source_id: str) -> SourceEndpointSetting | None:
 
 def resolve_source_url(source_id: str, default_url: str, **values: Any) -> str:
     item = source_setting(source_id)
-    if item is None or not item.enabled:
+    if item is None:
         return default_url
+    if not item.enabled:
+        raise ValueError(f"source {source_id} is disabled")
     template = item.request_template.strip() or "{base_url}"
     params = {"base_url": item.base_url, **values}
     try:
@@ -259,6 +301,7 @@ def install_source_settings_routes(app: FastAPI) -> None:
 
     @app.put("/api/settings/sources")
     def put_source_settings(document: SourceSettingsDocument) -> dict[str, object]:
+        document = _upgrade_document(document)
         _validate_document(document)
         path = save_source_settings(document)
         return {"saved": True, "settings_path": str(path), "sources": len(document.sources)}
@@ -278,7 +321,7 @@ SOURCE_SETTINGS_CARD = r"""
     <label>Режим / Mode<select id="sourceSelectionMode" onchange="sourceSelectionModeChanged()"><option value="auto">AUTO — перебирать по порядку</option><option value="manual">MANUAL — только выбранный источник</option></select></label>
   </div>
   <label>Источник / Selected source<select id="sourceSelectionSelected"></select></label>
-  <label>Порядок AUTO / AUTO order<textarea id="sourceSelectionOrder" rows="4" placeholder="one source_id per line"></textarea></label>
+  <label>Порядок AUTO / AUTO order<textarea id="sourceSelectionOrder" rows="5" placeholder="one source_id per line"></textarea></label>
   <p class="hint">Порядок AUTO задаётся сверху вниз. Отключённые и несовместимые с системой источники пропускаются. MANUAL fail-closed: при недоступности выбранного источника скрытого перехода на другой источник нет.</p>
   <div id="sourceSelectionStatus" class="status">Политика выбора не загружена / Selection policy not loaded.</div>
 </div>
@@ -334,21 +377,21 @@ function renderSourceSettings(){
 }
 async function loadSourceSettings(){
   const status=document.getElementById('sourceSettingsStatus');
-  try{const r=await fetch('/api/settings/sources');const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));sourceSettingsDocument={version:d.version,sources:d.sources,selection:d.selection||{}};document.getElementById('sourceSettingsPath').textContent='Файл: '+d.settings_path;renderSourceSettings();renderSourceSelection();status.textContent='READY: '+d.sources.length+' sources';status.className='status ok';return true;}catch(e){status.textContent='FAILED: '+String(e);status.className='status danger';return false;}
+  try{const r=await fetch('/api/settings/sources');const d=await r.json();if(!r.ok)throw new Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail||d));sourceSettingsDocument={version:d.version,sources:d.sources,selection:d.selection||{}};document.getElementById('sourceSettingsPath').textContent='Файл: '+d.settings_path;renderSourceSettings();renderSourceSelection();status.textContent='READY: '+d.sources.length+' sources';status.className='status ok';return true;}catch(e){status.textContent='FAILED: '+String(e);status.className='status danger';return false;}
 }
 function collectSourceSettings(){
   syncSelectionFromUi();
   const rows=Array.from(document.querySelectorAll('.source-setting-row'));
   const sources=rows.map((row,i)=>({...sourceSettingsDocument.sources[i],source_id:row.querySelector('.src-id').value.trim(),label:row.querySelector('.src-label').value.trim(),enabled:row.querySelector('.src-enabled').checked,base_url:row.querySelector('.src-base').value.trim(),request_template:row.querySelector('.src-template').value,notes:row.querySelector('.src-notes').value.trim()}));
-  return {version:sourceSettingsDocument?.version||2,sources,selection:sourceSettingsDocument.selection||{}};
+  return {version:sourceSettingsDocument?.version||3,sources,selection:sourceSettingsDocument.selection||{}};
 }
 async function saveSourceSettings(){
   const button=document.getElementById('sourceSettingsSave'),status=document.getElementById('sourceSettingsStatus');button.disabled=true;
-  try{const payload=collectSourceSettings();const r=await fetch('/api/settings/sources',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!r.ok)throw new Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail||d));sourceSettingsDocument=payload;status.textContent='SAVED: '+d.settings_path;status.className='status ok';renderSourceSelection();return true;}catch(e){status.textContent='FAILED: '+String(e);status.className='status danger';return false;}finally{button.disabled=false;}
+  try{const payload=collectSourceSettings();const r=await fetch('/api/settings/sources',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!r.ok)throw new Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail||d));await loadSourceSettings();status.textContent='SAVED: '+d.settings_path;status.className='status ok';return true;}catch(e){status.textContent='FAILED: '+String(e);status.className='status danger';return false;}finally{button.disabled=false;}
 }
 async function resetSourceSettings(){
   const button=document.getElementById('sourceSettingsReset'),status=document.getElementById('sourceSettingsStatus');button.disabled=true;
-  try{const r=await fetch('/api/settings/sources/reset',{method:'POST'});const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));await loadSourceSettings();status.textContent='RESET: штатные настройки восстановлены';status.className='status ok';return true;}catch(e){status.textContent='FAILED: '+String(e);status.className='status danger';return false;}finally{button.disabled=false;}
+  try{const r=await fetch('/api/settings/sources/reset',{method:'POST'});const d=await r.json();if(!r.ok)throw new Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail||d));await loadSourceSettings();status.textContent='RESET: штатные настройки восстановлены';status.className='status ok';return true;}catch(e){status.textContent='FAILED: '+String(e);status.className='status danger';return false;}finally{button.disabled=false;}
 }
 document.addEventListener('change',event=>{if(event.target&&event.target.id==='sourceSelectionSelected')syncSelectionFromUi();});
 document.addEventListener('input',event=>{if(event.target&&event.target.id==='sourceSelectionOrder')syncSelectionFromUi();});
