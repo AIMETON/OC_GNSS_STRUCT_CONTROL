@@ -59,6 +59,11 @@ from constellation_control.preview.scenario_workspace import (
     SCENARIO_VARIANT_SCRIPT,
     install_scenario_variant_routes,
 )
+from constellation_control.preview.source_settings import install_source_settings_routes
+from constellation_control.preview.source_settings_tab import (
+    SOURCE_SETTINGS_PANE,
+    SOURCE_SETTINGS_TAB_SCRIPT,
+)
 from constellation_control.version import __version__ as PREVIEW_VERSION
 
 
@@ -80,7 +85,8 @@ def render_preview_page_for_test() -> str:
             f"{NAVCEN_GPS_RUNNER_CARD}"
             f"{MIXED_GNSS_RUNNER_CARD}"
             f"{SCENARIO_VARIANT_CARD}"
-            f"{GRAVITY_MODEL_CARD}</section></main>"
+            f"{GRAVITY_MODEL_CARD}"
+            f"{SOURCE_SETTINGS_PANE}</section></main>"
         ),
         1,
     )
@@ -108,6 +114,9 @@ def render_preview_page_for_test() -> str:
         "if(typeof syncMixedGnssTemplateSatellites==='function')syncMixedGnssTemplateSatellites();"
         "};\n"
         f"{OPERATOR_TABS_SCRIPT}\n"
+        f"{SOURCE_SETTINGS_TAB_SCRIPT}\n"
+        "const settingsBootstrap=bootstrap;"
+        "bootstrap=async function(){await settingsBootstrap();installSourceSettingsTab();await loadSourceSettings();};\n"
         f"{MISSION_TEMPLATE_POLICY_SCRIPT}\n"
         "bootstrap().catch(e=>setStatus(String(e),'danger'));",
         1,
@@ -139,4 +148,5 @@ def create_preview_app(scenario_root: Path = Path("scenarios"), output_root: Pat
     install_mixed_gnss_runner_routes(app, scenario_root)
     install_scenario_variant_routes(app, scenario_root)
     install_gravity_model_routes(app, scenario_root)
+    install_source_settings_routes(app)
     return app
