@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Iterable
+from typing import Any
 from urllib.parse import urlencode
 
 from constellation_control.adapters.reviewed_http_fetch import fetch_reviewed_url
