@@ -62,7 +62,10 @@ def probe_glonass_rinex_source(root: Path, request: GlonassRinexProbeRequest) ->
 
 def build_glonass_rinex_scenario(root: Path, request: GlonassRinexRunnerRequest) -> dict[str, object]:
     source = load_scenario(root / request.source_scenario_name)
-    template = next((s for s in source.constellation.satellites if s.satellite_id == request.template_satellite_id), None)
+    template = next(
+        (s for s in source.constellation.satellites if s.satellite_id == request.template_satellite_id),
+        None,
+    )
     if template is None:
         raise ValueError(f"unknown template_satellite_id: {request.template_satellite_id}")
     if not source.orekit_sidecar_url:
@@ -131,7 +134,10 @@ def build_glonass_rinex_scenario(root: Path, request: GlonassRinexRunnerRequest)
         }
     )
     target = _target(root, request.target_scenario_name)
-    target.write_text(yaml.safe_dump(child.model_dump(mode="json"), sort_keys=False, allow_unicode=True), encoding="utf-8")
+    target.write_text(
+        yaml.safe_dump(child.model_dump(mode="json"), sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
     return {
         "saved": True,
         "runnable": True,
@@ -154,10 +160,11 @@ def build_glonass_rinex_scenario(root: Path, request: GlonassRinexRunnerRequest)
 GLONASS_RINEX_CARD = """
 <div class="card" id="glonassRinexRunnerCard">
 <h3>RINEX NAV → GLONASS ScenarioConfig</h3>
-<p class="hint">Источник берётся из Settings. AUTO реально перебирает источники и возвращает журнал попыток; MANUAL fail-closed. Российские источники проверяются до BKG/WHU. Probe скачивает и валидирует RINEX без требования Orekit; создание runnable scenario дополнительно требует явную modelling authority с Orekit.</p>
+<p class="hint">Источник берётся из Settings. AUTO реально перебирает совместимые источники и возвращает журнал попыток; MANUAL fail-closed. Российские источники идут перед BKG/WHU. Probe скачивает и валидирует RINEX независимо от Orekit. Для runnable scenario modelling authority выбирается отдельно и явно.</p>
 <div class="grid">
 <label>Дата RINEX <input id="gloRinexDate" type="date"></label>
-<label>Шаблон КА <select id="gloRinexTemplate"></select></label>
+<label>Modelling authority <select id="gloRinexAuthority" onchange="loadGlonassRinexAuthority()"><option value="">— выберите явно —</option></select></label>
+<label>Шаблон КА authority <select id="gloRinexTemplate"></select></label>
 <label>Целевая эпоха <input id="gloRinexEpoch" type="text" placeholder="2026-09-09T00:00:00Z"></label>
 <label>Max age, s <input id="gloRinexAge" type="number" value="7200"></label>
 <label>GLONASS propagation step, s <input id="gloRinexStep" type="number" value="60"></label>
@@ -173,11 +180,21 @@ GLONASS_RINEX_CARD = """
 GLONASS_RINEX_SCRIPT = r"""
 function glonassRinexErrorDetail(d){if(!d)return 'RINEX runner failed';if(typeof d.detail==='string')return d.detail;if(d.detail!==undefined)return JSON.stringify(d.detail);return JSON.stringify(d);}
 function syncGlonassRinexTemplate(){
- if(!current)return;
- const normalized=current.normalized||current,sats=(normalized.constellation||{}).satellites||[];
- gloRinexTemplate.replaceChildren(...sats.map(s=>{const o=document.createElement('option');o.value=s.satellite_id;o.textContent=s.satellite_id;return o;}));
  if(!gloRinexDate.value)gloRinexDate.value=new Date().toISOString().slice(0,10);
- if(!gloRinexEpoch.value&&normalized.epoch)gloRinexEpoch.value=normalized.epoch;
+ const names=(typeof catalog!=='undefined'&&catalog&&catalog.scenarios)||[];
+ const previous=gloRinexAuthority.value;
+ gloRinexAuthority.replaceChildren(new Option('— выберите явно —',''),...names.map(x=>new Option(x,x)));
+ const normalized=current&&(current.normalized||current);
+ if(previous&&names.includes(previous))gloRinexAuthority.value=previous;
+ else if(normalized&&normalized.orekit_sidecar_url&&names.includes(scenario.value))gloRinexAuthority.value=scenario.value;
+ else gloRinexAuthority.value='';
+ if(gloRinexAuthority.value)void loadGlonassRinexAuthority();
+ else gloRinexTemplate.replaceChildren();
+}
+async function loadGlonassRinexAuthority(){
+ const name=gloRinexAuthority.value;gloRinexTemplate.replaceChildren();if(!name)return;
+ try{const r=await fetch('/api/scenarios/'+encodeURIComponent(name));const d=await r.json();if(!r.ok)throw new Error(glonassRinexErrorDetail(d));const normalized=d.normalized||d;if(!normalized.orekit_sidecar_url)throw new Error('Выбранный modelling authority не содержит orekit_sidecar_url');const sats=(normalized.constellation||{}).satellites||[];gloRinexTemplate.replaceChildren(...sats.map(s=>new Option(s.satellite_id,s.satellite_id)));if(!gloRinexEpoch.value&&normalized.epoch)gloRinexEpoch.value=normalized.epoch;gloRinexStatus.textContent='AUTHORITY READY: '+name;gloRinexStatus.className='status ok';}
+ catch(e){gloRinexAuthority.value='';gloRinexTemplate.replaceChildren();gloRinexStatus.textContent=String(e.message||e);gloRinexStatus.className='status danger';}
 }
 async function probeGlonassRinex(){
  const button=gloRinexProbeBtn;button.disabled=true;gloRinexStatus.textContent='RINEX source probe…';
@@ -187,7 +204,7 @@ async function probeGlonassRinex(){
 }
 async function buildGlonassRinex(){
  const button=gloRinexBuildBtn;button.disabled=true;
- try{gloRinexStatus.textContent='RINEX download / conversion…';if(!gloRinexDate.value)throw new Error('Дата RINEX обязательна / RINEX date is required');if(!gloRinexEpoch.value.trim())throw new Error('Целевая эпоха обязательна / target epoch is required');const p={source_date:gloRinexDate.value,source_scenario_name:scenario.value,template_satellite_id:gloRinexTemplate.value,target_epoch:gloRinexEpoch.value,max_ephemeris_age_s:Number(gloRinexAge.value),glonass_propagation_step_s:Number(gloRinexStep.value),target_scenario_name:gloRinexFile.value.trim(),new_scenario_id:gloRinexScenarioId.value.trim()};const r=await fetch('/api/glonass-rinex-runner/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});const d=await r.json();if(!r.ok)throw new Error(glonassRinexErrorDetail(d));gloRinexResult.textContent=JSON.stringify(d,null,2);gloRinexStatus.textContent='VALID: '+d.satellite_count+' GLONASS satellites; source='+d.selected_source_id;gloRinexStatus.className='status ok';}
+ try{gloRinexStatus.textContent='RINEX download / conversion…';if(!gloRinexDate.value)throw new Error('Дата RINEX обязательна / RINEX date is required');if(!gloRinexAuthority.value)throw new Error('Выберите modelling authority явно');if(!gloRinexTemplate.value)throw new Error('Выберите шаблон КА authority');if(!gloRinexEpoch.value.trim())throw new Error('Целевая эпоха обязательна / target epoch is required');const p={source_date:gloRinexDate.value,source_scenario_name:gloRinexAuthority.value,template_satellite_id:gloRinexTemplate.value,target_epoch:gloRinexEpoch.value,max_ephemeris_age_s:Number(gloRinexAge.value),glonass_propagation_step_s:Number(gloRinexStep.value),target_scenario_name:gloRinexFile.value.trim(),new_scenario_id:gloRinexScenarioId.value.trim()};const r=await fetch('/api/glonass-rinex-runner/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});const d=await r.json();if(!r.ok)throw new Error(glonassRinexErrorDetail(d));gloRinexResult.textContent=JSON.stringify(d,null,2);gloRinexStatus.textContent='VALID: '+d.satellite_count+' GLONASS satellites; source='+d.selected_source_id;gloRinexStatus.className='status ok';}
  catch(e){gloRinexStatus.textContent=String(e.message||e);gloRinexStatus.className='status danger';}
  finally{button.disabled=false;}
 }
