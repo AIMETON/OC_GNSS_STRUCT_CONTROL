@@ -118,14 +118,41 @@ DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
             capabilities=["glonass_ephemeris_table"],
         ),
         SourceEndpointSetting(
+            source_id="iac_gps",
+            label="IAC GPS ephemeris table",
+            base_url="https://glonass-iac.ru",
+            request_template="{base_url}/gps/ephemeris/ephemeris_json.php",
+            notes="Qualified IAC live GPS almanac/ephemeris table.",
+            systems=["GPS"],
+            capabilities=["gps_almanac_table"],
+        ),
+        SourceEndpointSetting(
+            source_id="iac_beidou_almanac",
+            label="IAC BeiDou almanac table",
+            base_url="https://glonass-iac.ru",
+            request_template="{base_url}/beidou/ephemeris/beidou_almanac_calc.php",
+            notes="Qualified IAC live BeiDou almanac data endpoint.",
+            systems=["BeiDou"],
+            capabilities=["beidou_almanac_table"],
+        ),
+        SourceEndpointSetting(
+            source_id="iac_beidou_constellation",
+            label="IAC BeiDou constellation table",
+            base_url="https://glonass-iac.ru",
+            request_template="{base_url}/beidou/sostavOG/",
+            notes="Qualified IAC live BeiDou constellation-composition page.",
+            systems=["BeiDou"],
+            capabilities=["beidou_constellation_table"],
+        ),
+        SourceEndpointSetting(
             source_id="iac_ftp_archive",
             label="IAC GLONASS FTP archive",
             base_url="ftp://ftp.glonass-iac.ru",
             request_template="{base_url}/{directory}/",
             notes=(
-                "Official Applied Consumer Centre FTP archive. Anonymous FTP on port 21. "
-                "MCC/IGS products are discovered at runtime and accepted as broadcast RINEX NAV only "
-                "after strict format/system validation."
+                "Official Applied Consumer Centre FTP archive. Anonymous FTP on port 21: login anonymous, "
+                "password anonymous. MCC/IGS products are discovered at runtime and accepted as broadcast "
+                "RINEX NAV only after strict format/system/date validation."
             ),
             systems=["GLONASS", "GPS"],
             capabilities=["archive_discovery", "broadcast_rinex_nav"],
@@ -150,13 +177,23 @@ DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
         ),
         "GPS": SourceSelectionPolicy(
             mode="auto",
-            auto_order=["fcnd_api", "navcen_gps_yuma", "navcen_gps_sem", "igs_bkg", "igs_whu"],
+            auto_order=[
+                "iac_gps",
+                "fcnd_api",
+                "navcen_gps_yuma",
+                "navcen_gps_sem",
+                "igs_bkg",
+                "igs_whu",
+            ],
         ),
         "Galileo": SourceSelectionPolicy(
             mode="auto",
             auto_order=["galileo_gsc_index", "galileo_gsc_files", "igs_bkg", "igs_whu"],
         ),
-        "BeiDou": SourceSelectionPolicy(mode="auto", auto_order=["igs_bkg", "igs_whu"]),
+        "BeiDou": SourceSelectionPolicy(
+            mode="auto",
+            auto_order=["iac_beidou_almanac", "iac_beidou_constellation", "igs_bkg", "igs_whu"],
+        ),
     },
 )
 
@@ -166,20 +203,19 @@ def settings_path() -> Path:
     return Path(configured) if configured else _DEFAULT_SETTINGS_PATH
 
 
-def _merge_auto_order(system: GNSSSystem, current: list[str], desired: list[str]) -> list[str]:
+def _merge_auto_order(current: list[str], desired: list[str]) -> list[str]:
     result: list[str] = []
     for source_id in current:
         if source_id and source_id not in result:
             result.append(source_id)
-    for source_id in desired:
+    for index, source_id in enumerate(desired):
         if source_id in result:
             continue
-        if source_id == "fcnd_api" and system == "GLONASS" and "iac_ftp_archive" in result:
-            result.insert(result.index("iac_ftp_archive") + 1, source_id)
-        elif source_id == "fcnd_api" and system == "GPS":
-            result.insert(0, source_id)
-        else:
+        next_known = next((candidate for candidate in desired[index + 1 :] if candidate in result), None)
+        if next_known is None:
             result.append(source_id)
+        else:
+            result.insert(result.index(next_known), source_id)
     return result
 
 
@@ -197,7 +233,7 @@ def _upgrade_document(document: SourceSettingsDocument) -> SourceSettingsDocumen
             upgraded.selection[system] = default_policy.model_copy(deep=True)
             continue
         if policy.mode == "auto":
-            policy.auto_order = _merge_auto_order(system, policy.auto_order, default_policy.auto_order)
+            policy.auto_order = _merge_auto_order(policy.auto_order, default_policy.auto_order)
     upgraded.version = 3
     return upgraded
 
@@ -321,8 +357,8 @@ SOURCE_SETTINGS_CARD = r"""
     <label>Режим / Mode<select id="sourceSelectionMode" onchange="sourceSelectionModeChanged()"><option value="auto">AUTO — перебирать по порядку</option><option value="manual">MANUAL — только выбранный источник</option></select></label>
   </div>
   <label>Источник / Selected source<select id="sourceSelectionSelected"></select></label>
-  <label>Порядок AUTO / AUTO order<textarea id="sourceSelectionOrder" rows="5" placeholder="one source_id per line"></textarea></label>
-  <p class="hint">Порядок AUTO задаётся сверху вниз. Отключённые и несовместимые с системой источники пропускаются. MANUAL fail-closed: при недоступности выбранного источника скрытого перехода на другой источник нет.</p>
+  <label>Порядок AUTO / AUTO order<textarea id="sourceSelectionOrder" rows="6" placeholder="one source_id per line"></textarea></label>
+  <p class="hint">Порядок AUTO задаётся сверху вниз. Конкретная операция использует только источники с подходящей capability. MANUAL fail-closed: несовместимый или недоступный источник не заменяется скрыто.</p>
   <div id="sourceSelectionStatus" class="status">Политика выбора не загружена / Selection policy not loaded.</div>
 </div>
 <div class="card" id="sourceSettingsCard">
