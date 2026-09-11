@@ -3,14 +3,16 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 _SETTINGS_ENV = "OC_GNSS_SOURCE_SETTINGS"
 _DEFAULT_SETTINGS_PATH = Path("runtime/settings/source_endpoints.json")
+GNSSSystem = Literal["GLONASS", "GPS", "Galileo", "BeiDou"]
+SourceSelectionMode = Literal["auto", "manual"]
 
 
 class SourceEndpointSetting(BaseModel):
@@ -20,6 +22,8 @@ class SourceEndpointSetting(BaseModel):
     base_url: str = Field(min_length=1, max_length=2048)
     request_template: str = Field(default="", max_length=4096)
     notes: str = Field(default="", max_length=1000)
+    systems: list[GNSSSystem] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
 
     @field_validator("base_url")
     @classmethod
@@ -31,9 +35,22 @@ class SourceEndpointSetting(BaseModel):
         return value.rstrip("/")
 
 
+class SourceSelectionPolicy(BaseModel):
+    mode: SourceSelectionMode = "auto"
+    selected_source_id: str | None = None
+    auto_order: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_manual_selection(self) -> SourceSelectionPolicy:
+        if self.mode == "manual" and not self.selected_source_id:
+            raise ValueError("selected_source_id is required in manual source-selection mode")
+        return self
+
+
 class SourceSettingsDocument(BaseModel):
-    version: int = 1
+    version: int = 2
     sources: list[SourceEndpointSetting]
+    selection: dict[GNSSSystem, SourceSelectionPolicy] = Field(default_factory=dict)
 
 
 DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
@@ -44,6 +61,8 @@ DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
             base_url="https://igs.bkg.bund.de/root_ftp/IGS/BRDC",
             request_template="{base_url}/{year}/{doy}/BRDC00WRD_R_{year}{doy}0000_01D_{system_suffix}.rnx.gz",
             notes="Reviewed global broadcast-navigation source.",
+            systems=["GLONASS", "GPS", "Galileo", "BeiDou"],
+            capabilities=["broadcast_rinex_nav"],
         ),
         SourceEndpointSetting(
             source_id="igs_whu",
@@ -51,6 +70,8 @@ DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
             base_url="ftp://igs.gnsswhu.cn/pub/gps/data/daily",
             request_template="{base_url}/{year}/{doy}/{yy}p/",
             notes="Directory is discovered at runtime; do not hard-code a filename.",
+            systems=["GLONASS", "GPS", "Galileo", "BeiDou"],
+            capabilities=["broadcast_rinex_nav"],
         ),
         SourceEndpointSetting(
             source_id="galileo_gsc_index",
@@ -58,6 +79,8 @@ DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
             base_url="https://www.gsc-europa.eu",
             request_template="{base_url}/gsc-products/almanac",
             notes="Official Galileo GSC almanac index.",
+            systems=["Galileo"],
+            capabilities=["almanac_index"],
         ),
         SourceEndpointSetting(
             source_id="galileo_gsc_files",
@@ -65,18 +88,24 @@ DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
             base_url="https://www.gsc-europa.eu",
             request_template="{base_url}/sites/default/files/",
             notes="Allowed official XML file prefix discovered from the index.",
+            systems=["Galileo"],
+            capabilities=["almanac_xml"],
         ),
         SourceEndpointSetting(
             source_id="navcen_gps_yuma",
             label="USCG NAVCEN GPS YUMA",
             base_url="https://www.navcen.uscg.gov",
             request_template="{base_url}/sites/default/files/gps/almanac/current_yuma.alm",
+            systems=["GPS"],
+            capabilities=["gps_yuma_almanac"],
         ),
         SourceEndpointSetting(
             source_id="navcen_gps_sem",
             label="USCG NAVCEN GPS SEM",
             base_url="https://www.navcen.uscg.gov",
             request_template="{base_url}/sites/default/files/gps/almanac/current_sem.al3",
+            systems=["GPS"],
+            capabilities=["gps_sem_almanac"],
         ),
         SourceEndpointSetting(
             source_id="iac_glonass",
@@ -84,6 +113,8 @@ DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
             base_url="https://glonass-iac.ru",
             request_template="{base_url}/glonass/ephemeris/ephemeris_json.php",
             notes="Operator-configurable IAC authority endpoint.",
+            systems=["GLONASS"],
+            capabilities=["glonass_ephemeris_table"],
         ),
         SourceEndpointSetting(
             source_id="iac_ftp_archive",
@@ -97,8 +128,25 @@ DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
                 "Use directory=MCC for the primary Russian GLONASS archive; exact product filenames are discovered "
                 "at runtime and are not hard-coded."
             ),
+            systems=["GLONASS", "GPS"],
+            capabilities=["archive_discovery"],
         ),
-    ]
+    ],
+    selection={
+        "GLONASS": SourceSelectionPolicy(
+            mode="auto",
+            auto_order=["iac_glonass", "iac_ftp_archive", "igs_bkg", "igs_whu"],
+        ),
+        "GPS": SourceSelectionPolicy(
+            mode="auto",
+            auto_order=["navcen_gps_yuma", "navcen_gps_sem", "igs_bkg", "igs_whu"],
+        ),
+        "Galileo": SourceSelectionPolicy(
+            mode="auto",
+            auto_order=["galileo_gsc_index", "galileo_gsc_files", "igs_bkg", "igs_whu"],
+        ),
+        "BeiDou": SourceSelectionPolicy(mode="auto", auto_order=["igs_bkg", "igs_whu"]),
+    },
 )
 
 
@@ -107,13 +155,21 @@ def settings_path() -> Path:
     return Path(configured) if configured else _DEFAULT_SETTINGS_PATH
 
 
+def _upgrade_document(document: SourceSettingsDocument) -> SourceSettingsDocument:
+    if document.selection:
+        return document
+    upgraded = DEFAULT_SOURCE_SETTINGS.model_copy(deep=True)
+    upgraded.sources = document.sources
+    return upgraded
+
+
 def load_source_settings() -> SourceSettingsDocument:
     path = settings_path()
     if not path.is_file():
         return DEFAULT_SOURCE_SETTINGS.model_copy(deep=True)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return SourceSettingsDocument.model_validate(payload)
+        return _upgrade_document(SourceSettingsDocument.model_validate(payload))
     except Exception as exc:  # noqa: BLE001 - runtime settings boundary
         raise ValueError(f"invalid source settings file {path}: {exc}") from exc
 
@@ -146,6 +202,50 @@ def resolve_source_url(source_id: str, default_url: str, **values: Any) -> str:
         raise ValueError(f"invalid request_template for {source_id}: {exc}") from exc
 
 
+def selected_source_sequence(
+    system: GNSSSystem,
+    *,
+    capability: str | None = None,
+) -> list[SourceEndpointSetting]:
+    document = load_source_settings()
+    by_id = {item.source_id: item for item in document.sources}
+    policy = document.selection.get(system, SourceSelectionPolicy())
+    if policy.mode == "manual":
+        ids = [policy.selected_source_id] if policy.selected_source_id else []
+    else:
+        ids = list(policy.auto_order)
+        ids.extend(item.source_id for item in document.sources if item.source_id not in ids)
+    result: list[SourceEndpointSetting] = []
+    for source_id in ids:
+        item = by_id.get(source_id or "")
+        if item is None or not item.enabled or (item.systems and system not in item.systems):
+            continue
+        if capability is not None and capability not in item.capabilities:
+            continue
+        result.append(item)
+    if policy.mode == "manual" and not result:
+        suffix = f" with capability {capability}" if capability else ""
+        raise ValueError(f"selected source is unavailable for {system}{suffix}")
+    return result
+
+
+def _validate_document(document: SourceSettingsDocument) -> None:
+    ids = [item.source_id for item in document.sources]
+    if len(ids) != len(set(ids)):
+        raise HTTPException(status_code=422, detail="source_id values must be unique")
+    known = set(ids)
+    for system, policy in document.selection.items():
+        referenced = list(policy.auto_order)
+        if policy.selected_source_id:
+            referenced.append(policy.selected_source_id)
+        unknown = [source_id for source_id in referenced if source_id not in known]
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{system} source-selection policy references unknown source_id: {', '.join(unknown)}",
+            )
+
+
 def install_source_settings_routes(app: FastAPI) -> None:
     @app.get("/api/settings/sources")
     def get_source_settings() -> dict[str, object]:
@@ -154,13 +254,12 @@ def install_source_settings_routes(app: FastAPI) -> None:
             "settings_path": str(settings_path()),
             "version": document.version,
             "sources": [item.model_dump(mode="json") for item in document.sources],
+            "selection": {system: policy.model_dump(mode="json") for system, policy in document.selection.items()},
         }
 
     @app.put("/api/settings/sources")
     def put_source_settings(document: SourceSettingsDocument) -> dict[str, object]:
-        ids = [item.source_id for item in document.sources]
-        if len(ids) != len(set(ids)):
-            raise HTTPException(status_code=422, detail="source_id values must be unique")
+        _validate_document(document)
         path = save_source_settings(document)
         return {"saved": True, "settings_path": str(path), "sources": len(document.sources)}
 
@@ -171,6 +270,18 @@ def install_source_settings_routes(app: FastAPI) -> None:
 
 
 SOURCE_SETTINGS_CARD = r"""
+<div class="card" id="sourceSelectionCard">
+  <h3>Выбор источника данных / Data source selection</h3>
+  <p class="hint">Для каждой ГНСС можно выбрать один конкретный источник или режим AUTO. AUTO перебирает только включённые источники по заданному порядку; ошибки каждого источника сохраняются, успешный источник фиксируется в provenance.</p>
+  <div class="grid">
+    <label>Система / System<select id="sourceSelectionSystem" onchange="renderSourceSelection()"><option>GLONASS</option><option>GPS</option><option>Galileo</option><option>BeiDou</option></select></label>
+    <label>Режим / Mode<select id="sourceSelectionMode" onchange="sourceSelectionModeChanged()"><option value="auto">AUTO — перебирать по порядку</option><option value="manual">MANUAL — только выбранный источник</option></select></label>
+  </div>
+  <label>Источник / Selected source<select id="sourceSelectionSelected"></select></label>
+  <label>Порядок AUTO / AUTO order<textarea id="sourceSelectionOrder" rows="4" placeholder="one source_id per line"></textarea></label>
+  <p class="hint">Порядок AUTO задаётся сверху вниз. Отключённые и несовместимые с системой источники пропускаются. MANUAL fail-closed: при недоступности выбранного источника скрытого перехода на другой источник нет.</p>
+  <div id="sourceSelectionStatus" class="status">Политика выбора не загружена / Selection policy not loaded.</div>
+</div>
 <div class="card" id="sourceSettingsCard">
   <h3>Источники данных / Data source settings</h3>
   <p class="hint">URL и шаблоны запросов хранятся локально и переживают перезапуск Preview. Подстановки в шаблонах: {base_url}, {year}, {yy}, {doy}, {system}, {system_suffix}, {prn}, {slot}, {directory}. Ошибка шаблона блокирует запрос явно.</p>
@@ -188,6 +299,29 @@ SOURCE_SETTINGS_CARD = r"""
 SOURCE_SETTINGS_SCRIPT = r"""
 let sourceSettingsDocument=null;
 function sourceSettingsEscape(value){return String(value??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));}
+function sourceSystemCandidates(system){return (sourceSettingsDocument?.sources||[]).filter(s=>s.enabled&&(!s.systems||!s.systems.length||s.systems.includes(system)));}
+function ensureSelectionPolicy(system){if(!sourceSettingsDocument.selection)sourceSettingsDocument.selection={};if(!sourceSettingsDocument.selection[system])sourceSettingsDocument.selection[system]={mode:'auto',selected_source_id:null,auto_order:sourceSystemCandidates(system).map(s=>s.source_id)};return sourceSettingsDocument.selection[system];}
+function renderSourceSelection(){
+  if(!sourceSettingsDocument)return;
+  const system=document.getElementById('sourceSelectionSystem').value,policy=ensureSelectionPolicy(system),candidates=sourceSystemCandidates(system);
+  const mode=document.getElementById('sourceSelectionMode'),selected=document.getElementById('sourceSelectionSelected'),order=document.getElementById('sourceSelectionOrder');
+  mode.value=policy.mode||'auto';selected.replaceChildren(...candidates.map(s=>new Option(s.label+' ['+s.source_id+']',s.source_id)));
+  if(policy.selected_source_id&&candidates.some(s=>s.source_id===policy.selected_source_id))selected.value=policy.selected_source_id;
+  else if(candidates.length)selected.value=candidates[0].source_id;
+  order.value=(policy.auto_order||[]).join('\n');sourceSelectionModeChanged(false);
+  document.getElementById('sourceSelectionStatus').textContent=(mode.value==='auto'?'AUTO: ':'MANUAL: ')+(mode.value==='auto'?(policy.auto_order||[]).join(' → '):(selected.value||'—'));
+}
+function sourceSelectionModeChanged(update=true){
+  const mode=document.getElementById('sourceSelectionMode').value,selected=document.getElementById('sourceSelectionSelected'),order=document.getElementById('sourceSelectionOrder');
+  selected.disabled=mode!=='manual';order.disabled=mode!=='auto';if(update)syncSelectionFromUi();
+}
+function syncSelectionFromUi(){
+  if(!sourceSettingsDocument)return;
+  const system=document.getElementById('sourceSelectionSystem').value,policy=ensureSelectionPolicy(system),mode=document.getElementById('sourceSelectionMode').value;
+  policy.mode=mode;policy.selected_source_id=mode==='manual'?document.getElementById('sourceSelectionSelected').value:null;
+  policy.auto_order=document.getElementById('sourceSelectionOrder').value.split(/\r?\n/).map(v=>v.trim()).filter(Boolean);
+  document.getElementById('sourceSelectionStatus').textContent=(mode==='auto'?'AUTO: '+policy.auto_order.join(' → '):'MANUAL: '+(policy.selected_source_id||'—'));
+}
 function renderSourceSettings(){
   const root=document.getElementById('sourceSettingsRows');if(!root||!sourceSettingsDocument)return;
   root.innerHTML=sourceSettingsDocument.sources.map((s,i)=>`<div class="card source-setting-row" data-index="${i}">
@@ -200,18 +334,22 @@ function renderSourceSettings(){
 }
 async function loadSourceSettings(){
   const status=document.getElementById('sourceSettingsStatus');
-  try{const r=await fetch('/api/settings/sources');const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));sourceSettingsDocument={version:d.version,sources:d.sources};document.getElementById('sourceSettingsPath').textContent='Файл: '+d.settings_path;renderSourceSettings();status.textContent='READY: '+d.sources.length+' sources';status.className='status ok';return true;}catch(e){status.textContent='FAILED: '+String(e);status.className='status danger';return false;}
+  try{const r=await fetch('/api/settings/sources');const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));sourceSettingsDocument={version:d.version,sources:d.sources,selection:d.selection||{}};document.getElementById('sourceSettingsPath').textContent='Файл: '+d.settings_path;renderSourceSettings();renderSourceSelection();status.textContent='READY: '+d.sources.length+' sources';status.className='status ok';return true;}catch(e){status.textContent='FAILED: '+String(e);status.className='status danger';return false;}
 }
 function collectSourceSettings(){
+  syncSelectionFromUi();
   const rows=Array.from(document.querySelectorAll('.source-setting-row'));
-  return {version:sourceSettingsDocument?.version||1,sources:rows.map(row=>({source_id:row.querySelector('.src-id').value.trim(),label:row.querySelector('.src-label').value.trim(),enabled:row.querySelector('.src-enabled').checked,base_url:row.querySelector('.src-base').value.trim(),request_template:row.querySelector('.src-template').value,notes:row.querySelector('.src-notes').value.trim()}))};
+  const sources=rows.map((row,i)=>({...sourceSettingsDocument.sources[i],source_id:row.querySelector('.src-id').value.trim(),label:row.querySelector('.src-label').value.trim(),enabled:row.querySelector('.src-enabled').checked,base_url:row.querySelector('.src-base').value.trim(),request_template:row.querySelector('.src-template').value,notes:row.querySelector('.src-notes').value.trim()}));
+  return {version:sourceSettingsDocument?.version||2,sources,selection:sourceSettingsDocument.selection||{}};
 }
 async function saveSourceSettings(){
   const button=document.getElementById('sourceSettingsSave'),status=document.getElementById('sourceSettingsStatus');button.disabled=true;
-  try{const payload=collectSourceSettings();const r=await fetch('/api/settings/sources',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!r.ok)throw new Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail||d));sourceSettingsDocument=payload;status.textContent='SAVED: '+d.settings_path;status.className='status ok';return true;}catch(e){status.textContent='FAILED: '+String(e);status.className='status danger';return false;}finally{button.disabled=false;}
+  try{const payload=collectSourceSettings();const r=await fetch('/api/settings/sources',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!r.ok)throw new Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail||d));sourceSettingsDocument=payload;status.textContent='SAVED: '+d.settings_path;status.className='status ok';renderSourceSelection();return true;}catch(e){status.textContent='FAILED: '+String(e);status.className='status danger';return false;}finally{button.disabled=false;}
 }
 async function resetSourceSettings(){
   const button=document.getElementById('sourceSettingsReset'),status=document.getElementById('sourceSettingsStatus');button.disabled=true;
   try{const r=await fetch('/api/settings/sources/reset',{method:'POST'});const d=await r.json();if(!r.ok)throw new Error(d.detail||JSON.stringify(d));await loadSourceSettings();status.textContent='RESET: штатные настройки восстановлены';status.className='status ok';return true;}catch(e){status.textContent='FAILED: '+String(e);status.className='status danger';return false;}finally{button.disabled=false;}
 }
+document.addEventListener('change',event=>{if(event.target&&event.target.id==='sourceSelectionSelected')syncSelectionFromUi();});
+document.addEventListener('input',event=>{if(event.target&&event.target.id==='sourceSelectionOrder')syncSelectionFromUi();});
 """
