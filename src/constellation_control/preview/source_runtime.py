@@ -71,7 +71,11 @@ def _rinex2_match(name: str) -> re.Match[str] | None:
 
 def _looks_like_rinex_name(name: str) -> bool:
     lower = name.lower()
-    return bool(_RINEX3_FILE_RE.search(name) or _rinex2_match(name) or lower.endswith((".nav", ".nav.gz")))
+    return bool(
+        _RINEX3_FILE_RE.search(name)
+        or _rinex2_match(name)
+        or lower.endswith((".nav", ".nav.gz"))
+    )
 
 
 def _decode_rinex_payload(payload: bytes, file_name: str) -> bytes:
@@ -135,7 +139,13 @@ def _rinex_mentions_day(rinex: bytes, day: date) -> bool:
 
 def _validate_requested_day(rinex: bytes, day: date, source_name: str) -> None:
     if not _rinex_mentions_day(rinex, day):
-        raise ValueError(f"{source_name}: RINEX payload has no navigation epoch for {day.isoformat()}")
+        raise ValueError(
+            f"{source_name}: RINEX payload has no navigation epoch for {day.isoformat()}"
+        )
+
+
+def _deterministic_gzip(rinex: bytes) -> bytes:
+    return gzip.compress(rinex, mtime=0)
 
 
 def _store_external_rinex(
@@ -152,7 +162,13 @@ def _store_external_rinex(
     cache_root: Path,
 ) -> CachedRinexNav:
     doy = source_date.timetuple().tm_yday
-    directory = cache_root.resolve() / provider_key / "brdc" / f"{source_date.year:04d}" / f"{doy:03d}"
+    directory = (
+        cache_root.resolve()
+        / provider_key
+        / "brdc"
+        / f"{source_date.year:04d}"
+        / f"{doy:03d}"
+    )
     directory.mkdir(parents=True, exist_ok=True)
 
     source_lower = source_file_name.lower()
@@ -160,17 +176,42 @@ def _store_external_rinex(
         cache_base_name = source_file_name[:-2]
     else:
         cache_base_name = source_file_name
-    normalized_name = cache_base_name if cache_base_name.lower().endswith(".gz") else cache_base_name + ".gz"
+    normalized_name = (
+        cache_base_name
+        if cache_base_name.lower().endswith(".gz")
+        else cache_base_name + ".gz"
+    )
     gzip_path = directory / normalized_name
     rinex_path = directory / normalized_name.removesuffix(".gz")
     manifest_path = directory / (normalized_name + ".manifest.json")
 
-    cached_gzip = source_payload if source_file_name.lower().endswith(".gz") else gzip.compress(rinex)
+    source_is_gzip = source_lower.endswith(".gz")
+    generated_gzip = source_payload if source_is_gzip else _deterministic_gzip(rinex)
     source_sha256 = hashlib.sha256(source_payload).hexdigest()
-    cached_gzip_sha256 = hashlib.sha256(cached_gzip).hexdigest()
     rinex_sha256 = hashlib.sha256(rinex).hexdigest()
-    if gzip_path.exists() and hashlib.sha256(gzip_path.read_bytes()).hexdigest() != cached_gzip_sha256:
-        raise ValueError(f"immutable {provider_key} RINEX gzip cache collision")
+
+    cached_gzip = generated_gzip
+    if gzip_path.exists():
+        existing_gzip = gzip_path.read_bytes()
+        if source_is_gzip:
+            if existing_gzip != generated_gzip:
+                raise ValueError(f"immutable {provider_key} RINEX gzip cache collision")
+            cached_gzip = existing_gzip
+        elif existing_gzip != generated_gzip:
+            # 0.2.15 generated gzip bytes with the wall-clock mtime. Accept that legacy cache
+            # only when it decompresses to the exact validated RINEX payload; new writes are
+            # deterministic (mtime=0), so subsequent installs no longer collide.
+            try:
+                legacy_rinex = gzip.decompress(existing_gzip)
+            except OSError as exc:
+                raise ValueError(
+                    f"immutable {provider_key} RINEX gzip cache collision"
+                ) from exc
+            if legacy_rinex != rinex:
+                raise ValueError(f"immutable {provider_key} RINEX gzip cache collision")
+            cached_gzip = existing_gzip
+
+    cached_gzip_sha256 = hashlib.sha256(cached_gzip).hexdigest()
     if rinex_path.exists() and hashlib.sha256(rinex_path.read_bytes()).hexdigest() != rinex_sha256:
         raise ValueError(f"immutable {provider_key} RINEX cache collision")
     if not gzip_path.exists():
@@ -179,7 +220,7 @@ def _store_external_rinex(
         rinex_path.write_bytes(rinex)
 
     manifest = {
-        "schema": "oc-gnss-external-rinex-cache-v2",
+        "schema": "oc-gnss-external-rinex-cache-v3",
         "provider": provider,
         "constellation": system,
         "format": "RINEX NAV",
@@ -197,8 +238,13 @@ def _store_external_rinex(
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
         if existing.get("source_sha256") != source_sha256 or existing.get("rinex_sha256") != rinex_sha256:
             raise ValueError(f"immutable {provider_key} RINEX manifest collision")
+        # Preserve the old manifest if it describes the same authoritative source/RINEX.
+        # Its gzip digest may legitimately differ because 0.2.15 embedded a gzip mtime.
     else:
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     return CachedRinexNav(
         source_url=source_url,
@@ -286,7 +332,7 @@ def _fetch_configured_whu(
     available = [name for name in preferred if name in subdirs]
     if not available:
         raise ValueError(
-            f"WHU daily root has no compatible navigation directory; "
+            "WHU daily root has no compatible navigation directory; "
             f"available={', '.join(sorted(name for name in subdirs if name))}"
         )
 
@@ -294,7 +340,9 @@ def _fetch_configured_whu(
     for subdir in available:
         directory_url = urljoin(day_root, subdir + "/")
         listing = fetch_reviewed_url(directory_url, timeout_s=timeout_s)
-        names = [name for raw in _parse_directory_listing(listing.raw) if (name := _safe_name(raw))]
+        names = [
+            name for raw in _parse_directory_listing(listing.raw) if (name := _safe_name(raw))
+        ]
         candidates = sorted(name for name in names if _looks_like_rinex_name(name))
         for name in candidates[:24]:
             try:
@@ -346,11 +394,19 @@ def _fcnd_record_time(record: dict[str, Any], day: date) -> str:
     return f"{day.isoformat()} 00:00:00"
 
 
-def _fcnd_candidate_score(name: str, record: dict[str, Any], day: date) -> tuple[int, int, int, str]:
+def _fcnd_candidate_score(
+    name: str,
+    record: dict[str, Any],
+    day: date,
+) -> tuple[int, int, int, str]:
     lower = name.lower()
     text = json.dumps(record, ensure_ascii=False).lower()
     doy = day.timetuple().tm_yday
-    date_tokens = (day.strftime("%Y%m%d"), f"{day.year:04d}{doy:03d}", day.strftime("%y%j"))
+    date_tokens = (
+        day.strftime("%Y%m%d"),
+        f"{day.year:04d}{doy:03d}",
+        day.strftime("%y%j"),
+    )
     return (
         1 if "nav" in lower or "navigation" in text or "навигац" in text else 0,
         1 if any(token.lower() in lower or token.lower() in text for token in date_tokens) else 0,
@@ -396,7 +452,10 @@ def _fetch_fcnd_rinex(
             if not _fcnd_candidate_matches_system(name, system):
                 continue
             candidates.append((name, _fcnd_record_time(record, day), record))
-        candidates.sort(key=lambda item: _fcnd_candidate_score(item[0], item[2], day), reverse=True)
+        candidates.sort(
+            key=lambda item: _fcnd_candidate_score(item[0], item[2], day),
+            reverse=True,
+        )
 
         for name, time_begin, _record in candidates[:24]:
             try:
@@ -404,7 +463,9 @@ def _fetch_fcnd_rinex(
                 rinex = _decode_rinex_payload(payload, name)
                 _validate_runtime_rinex_system(rinex, system, source_name=name)
                 _validate_requested_day(rinex, day, name)
-                query = urlencode([("datafile[time_begin]", time_begin), ("datafile[file_name]", name)])
+                query = urlencode(
+                    [("datafile[time_begin]", time_begin), ("datafile[file_name]", name)]
+                )
                 source_url = setting.base_url.rstrip("/") + "/api/getData/?" + query
                 return _store_external_rinex(
                     provider_key="fcnd",
@@ -426,7 +487,9 @@ def _fetch_fcnd_rinex(
             "FCND is reachable, but qualified navigation collections 134/58/56/148 contain no "
             f"{system} broadcast RINEX candidate for {day.isoformat()}"
         )
-    raise ValueError("FCND candidates did not yield valid broadcast RINEX NAV: " + "; ".join(errors[:8]))
+    raise ValueError(
+        "FCND candidates did not yield valid broadcast RINEX NAV: " + "; ".join(errors[:8])
+    )
 
 
 def _iac_expected_rinex2_name(day: date, system: str) -> str:
@@ -446,7 +509,9 @@ def _fetch_iac_ftp_rinex(
     expected = _iac_expected_rinex2_name(day, system)
     directory_url = f"{setting.base_url.rstrip('/')}/MCC/BRDC/{day.year:04d}/"
     listing = fetch_reviewed_url(directory_url, timeout_s=timeout_s)
-    names = [name for raw in _parse_directory_listing(listing.raw) if (name := _safe_name(raw))]
+    names = [
+        name for raw in _parse_directory_listing(listing.raw) if (name := _safe_name(raw))
+    ]
     by_lower = {name.lower(): name for name in names}
     candidates: list[str] = []
     for variant in (expected, expected + ".gz", expected + ".Z"):
@@ -525,7 +590,13 @@ def fetch_selected_broadcast_rinex(
             elif source_id == "igs_whu":
                 cached = _fetch_configured_whu(day, system, cache_root, timeout_s, setting)
             else:
-                attempts.append(SourceAttempt(source_id, "skip", "source has no broadcast-RINEX runtime adapter"))
+                attempts.append(
+                    SourceAttempt(
+                        source_id,
+                        "skip",
+                        "source has no broadcast-RINEX runtime adapter",
+                    )
+                )
                 if mode == "manual":
                     break
                 continue
@@ -535,7 +606,13 @@ def fetch_selected_broadcast_rinex(
                 break
             continue
         attempts.append(SourceAttempt(source_id, "success", cached.source_url))
-        return SelectedRinexNav(cached=cached, source_id=source_id, attempts=tuple(attempts))
+        return SelectedRinexNav(
+            cached=cached,
+            source_id=source_id,
+            attempts=tuple(attempts),
+        )
 
-    rendered = "; ".join(f"{item.source_id}={item.status}: {item.detail}" for item in attempts)
+    rendered = "; ".join(
+        f"{item.source_id}={item.status}: {item.detail}" for item in attempts
+    )
     raise OSError(f"all configured {system} RINEX sources failed; {rendered}")
