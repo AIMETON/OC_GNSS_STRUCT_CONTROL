@@ -58,6 +58,7 @@ starlette==1.6.0
 typer==0.27.1
 typing-extensions==4.16.0
 typing-inspection==0.4.4
+unlzw3==0.2.3
 uvicorn==0.52.3
 wrapt==2.3.0
 xlrd==2.0.2
