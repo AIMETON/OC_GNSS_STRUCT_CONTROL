@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from math import isclose, pi, radians, sqrt
 from unittest.mock import patch
 
@@ -41,33 +41,33 @@ _SAMPLE_XML = """<?xml version="1.0" encoding="UTF-8"?>
 </gal:Almanac>
 """
 
+# Mirrors the field-observed GSC structure: issueDate in header; SVID is a
+# direct child of svAlmanac; orbit/clock and signal statuses are nested.
 _NESTED_SAMPLE_XML = """<?xml version="1.0" encoding="UTF-8"?>
-<gal:Almanac xmlns:gal="urn:galileo:test">
-  <gal:SV>
-    <gal:SVID>11</gal:SVID>
-    <gal:orbital>
-      <gal:aSqRoot>12.5</gal:aSqRoot>
-      <gal:ecc>0.00125</gal:ecc>
-      <gal:deltai>0.0005</gal:deltai>
-      <gal:omega0>-0.25</gal:omega0>
-      <gal:omegaDot>-1.25E-9</gal:omegaDot>
-      <gal:w>0.125</gal:w>
-      <gal:m0>-0.375</gal:m0>
-    </gal:orbital>
-    <gal:clock>
-      <gal:af0>2.0E-4</gal:af0>
-      <gal:af1>-1.0E-11</gal:af1>
-      <gal:iod>7</gal:iod>
-      <gal:t0a>86400</gal:t0a>
-      <gal:wna>2</gal:wna>
-    </gal:clock>
-    <gal:status>
-      <gal:statusE5a>0</gal:statusE5a>
-      <gal:statusE5b>1</gal:statusE5b>
-      <gal:statusE1B>0</gal:statusE1B>
-    </gal:status>
-  </gal:SV>
-</gal:Almanac>
+<signalData>
+  <header><GAL-header><issueDate>2026-09-11T09:59:59.0Z</issueDate></GAL-header></header>
+  <body><Almanacs>
+    <svAlmanac>
+      <SVID>11</SVID>
+      <almanac>
+        <aSqRoot>12.5</aSqRoot>
+        <ecc>0.00125</ecc>
+        <deltai>0.0005</deltai>
+        <omega0>-0.25</omega0>
+        <omegaDot>-1.25E-9</omegaDot>
+        <w>0.125</w>
+        <m0>-0.375</m0>
+        <af0>2.0E-4</af0>
+        <af1>-1.0E-11</af1>
+        <iod>7</iod>
+        <t0a>466800</t0a>
+        <wna>3</wna>
+      </almanac>
+      <svFNavSignalStatus><statusE5a>0</statusE5a></svFNavSignalStatus>
+      <svINavSignalStatus><statusE5b>0</statusE5b><statusE1B>0</statusE1B></svINavSignalStatus>
+    </svAlmanac>
+  </Almanacs></body>
+</signalData>
 """
 
 
@@ -102,15 +102,17 @@ def test_gsc_xml_units_are_converted_explicitly() -> None:
     assert len(almanac.source_sha256) == 64
 
 
-def test_gsc_nested_record_structure_is_parsed() -> None:
-    almanac = parse_galileo_gsc_almanac("2026-09-08.xml", _NESTED_SAMPLE_XML)
+def test_field_observed_nested_gsc_structure_captures_issue_date_and_health() -> None:
+    almanac = parse_galileo_gsc_almanac("2026-09-11.xml", _NESTED_SAMPLE_XML)
     assert len(almanac.records) == 1
+    assert almanac.issue_date_utc == datetime(2026, 9, 11, 9, 59, 59, tzinfo=UTC)
     record = almanac.records[0]
     assert record.svid == 11
     assert record.delta_sqrt_a_m_sqrt == 12.5
     assert record.status_e5a == 0
-    assert record.status_e5b == 1
+    assert record.status_e5b == 0
     assert record.status_e1b == 0
+    assert record.healthy is True
 
 
 def test_gsc_xml_missing_required_field_fails_closed() -> None:
@@ -119,7 +121,7 @@ def test_gsc_xml_missing_required_field_fails_closed() -> None:
         parse_galileo_gsc_almanac("bad.xml", bad)
 
 
-def test_gsc_wna_is_not_silently_expanded_from_modulo_4() -> None:
+def test_gsc_wna_is_not_silently_expanded_in_python_preview() -> None:
     almanac = parse_galileo_gsc_almanac("x.xml", _SAMPLE_XML)
     assert almanac.records[0].wna_mod4 == 2
     assert not hasattr(almanac.records[0], "galileo_week")
@@ -140,6 +142,7 @@ def test_latest_fetch_tries_direct_daily_xml_before_index(monkeypatch) -> None:
     almanac = fetch_latest_galileo_gsc_almanac(as_of=date(2026, 9, 10), direct_lookback_days=5)
     assert almanac.source_url is not None and almanac.source_url.endswith("2026-09-08.xml")
     assert len(almanac.records) == 1
+    assert almanac.issue_date_utc is not None
     assert calls == [
         GSC_DAILY_FILE_PREFIX + "2026-09-10.xml",
         GSC_DAILY_FILE_PREFIX + "2026-09-09.xml",
@@ -147,10 +150,13 @@ def test_latest_fetch_tries_direct_daily_xml_before_index(monkeypatch) -> None:
     ]
 
 
-def test_preview_exposes_galileo_gsc_online_and_offline() -> None:
+def test_preview_exposes_galileo_gsc_runnable_workflow() -> None:
     page = render_preview_page_for_test()
-    assert "Galileo — официальный GSC Almanac" in page
+    assert "Galileo GSC Almanac → runnable ScenarioConfig" in page
     assert "/api/galileo-gsc/online" in page
+    assert "/api/galileo-gsc/authority-preview" in page
+    assert "/api/galileo-gsc/create" in page
+    assert "Создать полноценный сценарий / Create runnable scenario" in page
 
     client = TestClient(create_preview_app())
     source = client.get("/api/galileo-gsc/source")
@@ -159,13 +165,15 @@ def test_preview_exposes_galileo_gsc_online_and_offline() -> None:
 
     offline = client.post(
         "/api/galileo-gsc/offline-preview",
-        json={"filename": "galileo.xml", "content_text": _NESTED_SAMPLE_XML},
+        json={"filename": "2026-09-11.xml", "content_text": _NESTED_SAMPLE_XML},
     )
     assert offline.status_code == 200
     payload = offline.json()
     assert payload["record_count"] == 1
     assert payload["records"][0]["svid"] == 11
-    assert payload["runnable_promotion_allowed"] is False
+    assert payload["issue_date_utc"].startswith("2026-09-11T09:59:59")
+    assert payload["runnable_promotion_allowed"] is True
+    assert payload["content_text"] == _NESTED_SAMPLE_XML
 
 
 def test_gsc_online_failure_is_fail_closed() -> None:
