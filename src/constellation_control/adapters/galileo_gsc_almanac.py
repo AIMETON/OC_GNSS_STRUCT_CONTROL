@@ -165,6 +165,32 @@ def discover_latest_gsc_almanac_url(index_html: str) -> str:
     return max(candidates, key=_candidate_sort_key)
 
 
+def _record_fields(element: ElementTree.Element) -> dict[str, str] | None:
+    # GSC has used both flat SV records and records where the orbital/status
+    # parameters are grouped below nested child elements. SVID remains the
+    # record discriminator, so only subtrees with a direct SVID child are
+    # candidates; required values may then be descendants of that same record.
+    direct = {_local_name(child.tag): (child.text or "").strip() for child in list(element)}
+    if "SVID" not in direct:
+        return None
+
+    fields: dict[str, str] = {}
+    for node in element.iter():
+        if node is element:
+            continue
+        name = _local_name(node.tag)
+        if name not in _REQUIRED_FIELDS:
+            continue
+        value = (node.text or "").strip()
+        if not value:
+            continue
+        existing = fields.get(name)
+        if existing is not None and existing != value:
+            raise ValueError(f"Galileo GSC record contains conflicting {name} values")
+        fields[name] = value
+    return fields
+
+
 def parse_galileo_gsc_almanac(
     filename: str,
     xml_text: str,
@@ -184,29 +210,29 @@ def parse_galileo_gsc_almanac(
 
     records: list[GalileoGscAlmanacRecord] = []
     for element in root.iter():
-        children = {_local_name(child.tag): (child.text or "").strip() for child in list(element)}
-        if "SVID" not in children:
+        fields = _record_fields(element)
+        if fields is None:
             continue
-        missing = [field for field in _REQUIRED_FIELDS if field not in children]
+        missing = [field for field in _REQUIRED_FIELDS if field not in fields]
         if missing:
             raise ValueError("Galileo GSC record missing fields: " + ", ".join(missing))
         record = GalileoGscAlmanacRecord(
-            svid=_integer(children["SVID"], "SVID"),
-            delta_sqrt_a_m_sqrt=_number(children["aSqRoot"], "aSqRoot"),
-            eccentricity=_number(children["ecc"], "ecc"),
-            delta_inclination_semicircles=_number(children["deltai"], "deltai"),
-            raan_semicircles=_number(children["omega0"], "omega0"),
-            raan_rate_semicircles_s=_number(children["omegaDot"], "omegaDot"),
-            argument_of_perigee_semicircles=_number(children["w"], "w"),
-            mean_anomaly_semicircles=_number(children["m0"], "m0"),
-            af0_s=_number(children["af0"], "af0"),
-            af1_s_s=_number(children["af1"], "af1"),
-            iod=_integer(children["iod"], "iod"),
-            t0a_s=_number(children["t0a"], "t0a"),
-            wna_mod4=_integer(children["wna"], "wna"),
-            status_e5a=_integer(children["statusE5a"], "statusE5a"),
-            status_e5b=_integer(children["statusE5b"], "statusE5b"),
-            status_e1b=_integer(children["statusE1B"], "statusE1B"),
+            svid=_integer(fields["SVID"], "SVID"),
+            delta_sqrt_a_m_sqrt=_number(fields["aSqRoot"], "aSqRoot"),
+            eccentricity=_number(fields["ecc"], "ecc"),
+            delta_inclination_semicircles=_number(fields["deltai"], "deltai"),
+            raan_semicircles=_number(fields["omega0"], "omega0"),
+            raan_rate_semicircles_s=_number(fields["omegaDot"], "omegaDot"),
+            argument_of_perigee_semicircles=_number(fields["w"], "w"),
+            mean_anomaly_semicircles=_number(fields["m0"], "m0"),
+            af0_s=_number(fields["af0"], "af0"),
+            af1_s_s=_number(fields["af1"], "af1"),
+            iod=_integer(fields["iod"], "iod"),
+            t0a_s=_number(fields["t0a"], "t0a"),
+            wna_mod4=_integer(fields["wna"], "wna"),
+            status_e5a=_integer(fields["statusE5a"], "statusE5a"),
+            status_e5b=_integer(fields["statusE5b"], "statusE5b"),
+            status_e1b=_integer(fields["statusE1B"], "statusE1B"),
         )
         if not 1 <= record.svid <= 36:
             raise ValueError(f"Galileo GSC SVID out of range: {record.svid}")
