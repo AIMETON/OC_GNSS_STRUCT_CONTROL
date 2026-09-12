@@ -14,7 +14,6 @@ from urllib.parse import urlencode, urljoin
 from constellation_control.adapters.bkg_rinex_nav import (
     CachedRinexNav,
     _parse_directory_listing,
-    _select_whu_navigation_file,
     _validate_complete_rinex_system,
 )
 from constellation_control.adapters.fcnd_api import FcndApiClient
@@ -44,22 +43,14 @@ class SelectedRinexNav:
     attempts: tuple[SourceAttempt, ...]
 
 
-_RINEX_FILE_SUFFIXES = (
-    ".rnx",
-    ".rnx.gz",
-    ".nav",
-    ".nav.gz",
-    ".n",
-    ".n.gz",
-    ".g",
-    ".g.gz",
-)
 _SYSTEM_SUFFIX = {
     "GLONASS": "RN",
     "GPS": "GN",
     "Galileo": "EN",
     "BeiDou": "CN",
 }
+_RINEX3_FILE_RE = re.compile(r"(?i)\.rnx(?:\.gz)?$")
+_RINEX2_NAV_RE = re.compile(r"(?i)^brdc(?P<doy>\d{3})0\.(?P<yy>\d{2})(?P<kind>[gfnl])(?:\.z)?$")
 
 
 def _safe_name(value: str) -> str | None:
@@ -70,16 +61,52 @@ def _safe_name(value: str) -> str | None:
 
 
 def _looks_like_rinex_name(name: str) -> bool:
-    return name.lower().endswith(_RINEX_FILE_SUFFIXES)
+    lower = name.lower()
+    return bool(_RINEX3_FILE_RE.search(name) or _RINEX2_NAV_RE.match(name) or lower.endswith((".nav", ".nav.gz")))
 
 
 def _decode_rinex_payload(payload: bytes, file_name: str) -> bytes:
-    if file_name.lower().endswith(".gz") or payload[:2] == b"\x1f\x8b":
+    lower = file_name.lower()
+    if lower.endswith(".z") and not lower.endswith(".gz"):
+        raise ValueError(
+            f"{file_name}: Unix-compress .Z payload is not accepted by the portable runtime; "
+            "use an uncompressed or .gz source candidate"
+        )
+    if lower.endswith(".gz") or payload[:2] == b"\x1f\x8b":
         try:
             return gzip.decompress(payload)
         except OSError as exc:
             raise ValueError(f"{file_name}: invalid gzip RINEX payload") from exc
     return payload
+
+
+def _rinex_version_and_first_line(raw: bytes) -> tuple[float, str]:
+    first = raw.decode("ascii", errors="replace").splitlines()[0] if raw else ""
+    try:
+        version = float(first[:9].strip())
+    except ValueError:
+        version = 3.0
+    return version, first
+
+
+def _validate_runtime_rinex_system(raw: bytes, system: str, *, source_name: str) -> None:
+    version, first = _rinex_version_and_first_line(raw)
+    if version >= 3.0 or system == "GPS":
+        _validate_complete_rinex_system(raw, system)
+        return
+    if system != "GLONASS":
+        raise ValueError(f"RINEX {version:g} cannot establish {system} coverage")
+
+    head = raw[:32768].decode("ascii", errors="replace")
+    if "RINEX VERSION / TYPE" not in head or "END OF HEADER" not in head:
+        raise ValueError("RINEX navigation header is incomplete")
+    first_upper = first.upper()
+    name_match = _RINEX2_NAV_RE.match(source_name)
+    glonass_file_type = bool(name_match and name_match.group("kind").lower() == "g")
+    if "NAV" not in first_upper:
+        raise ValueError("downloaded RINEX file is not navigation data")
+    if "GLONASS" not in first_upper and not glonass_file_type:
+        raise ValueError("RINEX 2 navigation payload cannot establish GLONASS coverage")
 
 
 def _rinex_mentions_day(rinex: bytes, day: date) -> bool:
@@ -110,13 +137,7 @@ def _store_external_rinex(
     cache_root: Path,
 ) -> CachedRinexNav:
     doy = source_date.timetuple().tm_yday
-    directory = (
-        cache_root.resolve()
-        / provider_key
-        / "brdc"
-        / f"{source_date.year:04d}"
-        / f"{doy:03d}"
-    )
+    directory = cache_root.resolve() / provider_key / "brdc" / f"{source_date.year:04d}" / f"{doy:03d}"
     directory.mkdir(parents=True, exist_ok=True)
     normalized_name = source_file_name
     if not normalized_name.lower().endswith(".gz"):
@@ -139,7 +160,7 @@ def _store_external_rinex(
         rinex_path.write_bytes(rinex)
 
     manifest = {
-        "schema": "oc-gnss-external-rinex-cache-v1",
+        "schema": "oc-gnss-external-rinex-cache-v2",
         "provider": provider,
         "constellation": system,
         "format": "RINEX NAV",
@@ -158,10 +179,7 @@ def _store_external_rinex(
         if existing.get("source_sha256") != source_sha256 or existing.get("rinex_sha256") != rinex_sha256:
             raise ValueError(f"immutable {provider_key} RINEX manifest collision")
     else:
-        manifest_path.write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     return CachedRinexNav(
         source_url=source_url,
@@ -208,7 +226,7 @@ def _fetch_configured_bkg(
         raise ValueError("IGS BKG request template must resolve to a gzip RINEX file")
     response = fetch_reviewed_url(url, timeout_s=timeout_s)
     rinex = _decode_rinex_payload(response.raw, name)
-    _validate_complete_rinex_system(rinex, system)
+    _validate_runtime_rinex_system(rinex, system, source_name=name)
     _validate_requested_day(rinex, day, name)
     return _store_external_rinex(
         provider_key="igs-bkg",
@@ -224,6 +242,11 @@ def _fetch_configured_bkg(
     )
 
 
+def _whu_day_root(setting: SourceEndpointSetting, day: date) -> str:
+    doy = day.timetuple().tm_yday
+    return f"{setting.base_url.rstrip('/')}/{day.year:04d}/{doy:03d}/"
+
+
 def _fetch_configured_whu(
     day: date,
     system: str,
@@ -231,27 +254,56 @@ def _fetch_configured_whu(
     timeout_s: float,
     setting: SourceEndpointSetting,
 ) -> CachedRinexNav:
-    directory_url = _render_source_template(setting, day, system).rstrip("/") + "/"
-    listing = fetch_reviewed_url(directory_url, timeout_s=timeout_s)
-    names = _parse_directory_listing(listing.raw)
-    name = _select_whu_navigation_file(names, day, system)
-    url = urljoin(directory_url, name)
-    response = fetch_reviewed_url(url, timeout_s=timeout_s)
-    rinex = _decode_rinex_payload(response.raw, name)
-    _validate_complete_rinex_system(rinex, system)
-    _validate_requested_day(rinex, day, name)
-    return _store_external_rinex(
-        provider_key="igs-whu",
-        provider="Wuhan University IGS Data Center",
-        source_url=url,
-        source_file_name=name,
-        source_payload=response.raw,
-        rinex=rinex,
-        source_date=day,
-        system=system,
-        transport=response.transport,
-        cache_root=cache_root,
-    )
+    day_root = _whu_day_root(setting, day)
+    root_response = fetch_reviewed_url(day_root, timeout_s=timeout_s)
+    subdirs = {_safe_name(name) for name in _parse_directory_listing(root_response.raw)}
+    yy = day.year % 100
+    preferred = [f"{yy:02d}m"]
+    if system == "GLONASS":
+        preferred.append(f"{yy:02d}g")
+    elif system == "GPS":
+        preferred.append(f"{yy:02d}n")
+    available = [name for name in preferred if name in subdirs]
+    if not available:
+        raise ValueError(
+            f"WHU daily root has no compatible navigation directory; "
+            f"available={', '.join(sorted(name for name in subdirs if name))}"
+        )
+
+    errors: list[str] = []
+    for subdir in available:
+        directory_url = urljoin(day_root, subdir + "/")
+        listing = fetch_reviewed_url(directory_url, timeout_s=timeout_s)
+        names = [name for raw in _parse_directory_listing(listing.raw) if (name := _safe_name(raw))]
+        if subdir.endswith("m"):
+            candidates = sorted(
+                (name for name in names if name.lower().endswith(".rnx.gz") and "_01d_" in name.lower()),
+                key=lambda name: ("_mm.rnx.gz" not in name.lower(), name),
+            )
+        else:
+            candidates = sorted(name for name in names if _looks_like_rinex_name(name))
+        for name in candidates[:24]:
+            try:
+                url = urljoin(directory_url, name)
+                response = fetch_reviewed_url(url, timeout_s=timeout_s)
+                rinex = _decode_rinex_payload(response.raw, name)
+                _validate_runtime_rinex_system(rinex, system, source_name=name)
+                _validate_requested_day(rinex, day, name)
+                return _store_external_rinex(
+                    provider_key="igs-whu",
+                    provider="Wuhan University IGS Data Center",
+                    source_url=url,
+                    source_file_name=name,
+                    source_payload=response.raw,
+                    rinex=rinex,
+                    source_date=day,
+                    system=system,
+                    transport=response.transport,
+                    cache_root=cache_root,
+                )
+            except (OSError, ValueError) as exc:
+                errors.append(f"{subdir}/{name}: {exc}")
+    raise ValueError("WHU candidates did not yield valid RINEX NAV: " + "; ".join(errors[:8]))
 
 
 def _walk_json_dicts(value: Any) -> Iterable[dict[str, Any]]:
@@ -264,8 +316,16 @@ def _walk_json_dicts(value: Any) -> Iterable[dict[str, Any]]:
             yield from _walk_json_dicts(child)
 
 
+def _fcnd_record_name(record: dict[str, Any]) -> str | None:
+    for key in ("pk_file_name", "file_name", "filename", "name"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return _safe_name(value)
+    return None
+
+
 def _fcnd_record_time(record: dict[str, Any], day: date) -> str:
-    for key in ("time_begin", "datetime", "date_time", "time", "date"):
+    for key in ("pt_time_begin", "time_begin", "datetime", "date_time", "time", "date"):
         value = record.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -278,9 +338,9 @@ def _fcnd_candidate_score(name: str, record: dict[str, Any], day: date) -> tuple
     doy = day.timetuple().tm_yday
     date_tokens = (day.strftime("%Y%m%d"), f"{day.year:04d}{doy:03d}", day.strftime("%y%j"))
     return (
-        1 if "nav" in lower or "navigation" in text else 0,
+        1 if "nav" in lower or "navigation" in text or "навигац" in text else 0,
         1 if any(token.lower() in lower or token.lower() in text for token in date_tokens) else 0,
-        1 if lower.endswith((".rnx.gz", ".rnx")) else 0,
+        1 if _looks_like_rinex_name(name) else 0,
         name,
     )
 
@@ -296,39 +356,32 @@ def _fetch_fcnd_rinex(
     catalogue = client.list_data(
         time_begin=f"{day.strftime('%d-%m-%Y')} 00:00:00",
         time_end=f"{day.strftime('%d-%m-%Y')} 23:59:59",
-        data_type="gnss",
-        limit=2000,
+        limit=500,
     )
     candidates: list[tuple[str, str, dict[str, Any]]] = []
     for record in _walk_json_dicts(catalogue):
-        raw_name = next(
-            (
-                record.get(key)
-                for key in ("file_name", "filename", "name")
-                if isinstance(record.get(key), str)
-            ),
-            None,
-        )
-        if not isinstance(raw_name, str):
-            continue
-        name = _safe_name(raw_name)
+        name = _fcnd_record_name(record)
         if name is None or not _looks_like_rinex_name(name):
+            continue
+        text = json.dumps(record, ensure_ascii=False).lower()
+        if name.lower().endswith(("o", "o.gz", ".obs", ".obs.gz")) or "observation" in text or "измерен" in text:
             continue
         candidates.append((name, _fcnd_record_time(record, day), record))
     if not candidates:
-        raise ValueError("FCND getData returned no RINEX-like GNSS files for requested day")
+        raise ValueError(
+            "FCND catalogue is reachable, but no broadcast-navigation RINEX candidate was identified "
+            "for the requested day"
+        )
     candidates.sort(key=lambda item: _fcnd_candidate_score(item[0], item[2], day), reverse=True)
 
     errors: list[str] = []
-    for name, time_begin, _record in candidates[:32]:
+    for name, time_begin, _record in candidates[:24]:
         try:
             payload = client.download_datafile(time_begin=time_begin, file_name=name)
             rinex = _decode_rinex_payload(payload, name)
-            _validate_complete_rinex_system(rinex, system)
+            _validate_runtime_rinex_system(rinex, system, source_name=name)
             _validate_requested_day(rinex, day, name)
-            query = urlencode(
-                [("datafile[time_begin]", time_begin), ("datafile[file_name]", name)]
-            )
+            query = urlencode([("datafile[time_begin]", time_begin), ("datafile[file_name]", name)])
             source_url = setting.base_url.rstrip("/") + "/api/getData/?" + query
             return _store_external_rinex(
                 provider_key="fcnd",
@@ -344,20 +397,14 @@ def _fetch_fcnd_rinex(
             )
         except (OSError, ValueError) as exc:
             errors.append(f"{name}: {exc}")
-    raise ValueError(
-        "FCND candidates did not yield a valid broadcast RINEX NAV file: " + "; ".join(errors[:8])
-    )
+    raise ValueError("FCND candidates did not yield valid broadcast RINEX NAV: " + "; ".join(errors[:8]))
 
 
-def _rank_archive_url(name: str, url: str, day: date) -> tuple[int, int, str]:
-    lower = (name + " " + url).lower()
-    doy = day.timetuple().tm_yday
-    tokens = (day.strftime("%Y%m%d"), f"{day.year:04d}{doy:03d}", day.strftime("%y%j"))
-    return (
-        1 if any(token.lower() in lower for token in tokens) else 0,
-        1 if "brdc" in lower or "nav" in lower else 0,
-        name,
-    )
+def _iac_expected_rinex2_name(day: date, system: str) -> str:
+    kind = {"GLONASS": "g", "GPS": "n"}.get(system)
+    if kind is None:
+        raise ValueError(f"IAC MCC BRDC RINEX 2 source does not support {system}")
+    return f"Brdc{day.timetuple().tm_yday:03d}0.{day.year % 100:02d}{kind}"
 
 
 def _fetch_iac_ftp_rinex(
@@ -367,41 +414,42 @@ def _fetch_iac_ftp_rinex(
     timeout_s: float,
     setting: SourceEndpointSetting,
 ) -> CachedRinexNav:
-    base_url = setting.base_url.rstrip("/") + "/"
-    queue: list[tuple[str, int]] = [
-        (urljoin(base_url, "MCC/"), 0),
-        (urljoin(base_url, "IGS/"), 0),
-    ]
-    visited: set[str] = set()
-    file_urls: list[tuple[str, str]] = []
-    while queue and len(visited) < 64:
-        directory_url, depth = queue.pop(0)
-        if directory_url in visited:
-            continue
-        visited.add(directory_url)
-        response = fetch_reviewed_url(directory_url, timeout_s=timeout_s)
-        for raw_name in _parse_directory_listing(response.raw):
-            name = _safe_name(raw_name)
-            if name is None:
-                continue
-            child = urljoin(directory_url, name)
-            if _looks_like_rinex_name(name):
-                file_urls.append((name, child))
-            elif depth < 3 and "." not in name and len(name) <= 80:
-                queue.append((child.rstrip("/") + "/", depth + 1))
-    if not file_urls:
-        raise ValueError("IAC FTP MCC/IGS discovery found no RINEX-like files")
-    file_urls.sort(key=lambda item: _rank_archive_url(item[0], item[1], day), reverse=True)
+    expected = _iac_expected_rinex2_name(day, system)
+    directory_url = f"{setting.base_url.rstrip('/')}/MCC/BRDC/{day.year:04d}/"
+    listing = fetch_reviewed_url(directory_url, timeout_s=timeout_s)
+    names = [name for raw in _parse_directory_listing(listing.raw) if (name := _safe_name(raw))]
+    by_lower = {name.lower(): name for name in names}
+    candidates: list[str] = []
+    for variant in (expected, expected + ".gz", expected + ".Z"):
+        actual = by_lower.get(variant.lower())
+        if actual is not None:
+            candidates.append(actual)
+    if not candidates:
+        matching_day = [
+            name
+            for name in names
+            if (match := _RINEX2_NAV_RE.match(name))
+            and int(match.group("doy")) == day.timetuple().tm_yday
+            and int(match.group("yy")) == day.year % 100
+        ]
+        candidates.extend(matching_day)
+    if not candidates:
+        raise ValueError(
+            f"IAC MCC/BRDC/{day.year} has no {system} broadcast RINEX for DOY "
+            f"{day.timetuple().tm_yday:03d}; expected {expected}"
+        )
+
     errors: list[str] = []
-    for name, url in file_urls[:32]:
+    for name in candidates:
         try:
+            url = urljoin(directory_url, name)
             response = fetch_reviewed_url(url, timeout_s=timeout_s)
             rinex = _decode_rinex_payload(response.raw, name)
-            _validate_complete_rinex_system(rinex, system)
+            _validate_runtime_rinex_system(rinex, system, source_name=name)
             _validate_requested_day(rinex, day, name)
             return _store_external_rinex(
                 provider_key="iac-ftp",
-                provider="IAC GLONASS FTP archive",
+                provider="IAC GLONASS MCC broadcast archive",
                 source_url=url,
                 source_file_name=name,
                 source_payload=response.raw,
@@ -413,7 +461,7 @@ def _fetch_iac_ftp_rinex(
             )
         except (OSError, ValueError) as exc:
             errors.append(f"{name}: {exc}")
-    raise ValueError("IAC FTP candidates did not yield valid RINEX NAV: " + "; ".join(errors[:8]))
+    raise ValueError("IAC MCC BRDC candidates failed validation: " + "; ".join(errors[:8]))
 
 
 def fetch_selected_broadcast_rinex(
@@ -447,9 +495,7 @@ def fetch_selected_broadcast_rinex(
             elif source_id == "igs_whu":
                 cached = _fetch_configured_whu(day, system, cache_root, timeout_s, setting)
             else:
-                attempts.append(
-                    SourceAttempt(source_id, "skip", "source has no broadcast-RINEX runtime adapter")
-                )
+                attempts.append(SourceAttempt(source_id, "skip", "source has no broadcast-RINEX runtime adapter"))
                 if mode == "manual":
                     break
                 continue
