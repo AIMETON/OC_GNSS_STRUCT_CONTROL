@@ -81,6 +81,8 @@ def _decode_rinex_payload(payload: bytes, file_name: str) -> bytes:
             decoded = unlzw3.unlzw(payload)
         except Exception as exc:  # noqa: BLE001 - decompressor boundary
             raise ValueError(f"{file_name}: invalid Unix-compress .Z RINEX payload") from exc
+        if isinstance(decoded, bytes):
+            return decoded
         try:
             return decoded.encode("ascii")
         except UnicodeEncodeError as exc:
