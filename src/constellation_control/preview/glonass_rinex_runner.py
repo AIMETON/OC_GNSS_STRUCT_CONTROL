@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import yaml
@@ -39,6 +39,19 @@ def _target(root: Path, name: str) -> Path:
     return target
 
 
+def _validated_target_epoch(request: GlonassRinexRunnerRequest) -> datetime:
+    target_epoch = request.target_epoch
+    if target_epoch.tzinfo is None or target_epoch.utcoffset() is None:
+        raise ValueError("target_epoch must include an explicit UTC offset, for example 2026-09-11T12:00:00Z")
+    target_utc = target_epoch.astimezone(UTC)
+    if target_utc.date() != request.source_date:
+        raise ValueError(
+            "target_epoch UTC date must match source_date for daily RINEX authority: "
+            f"source_date={request.source_date.isoformat()} target_epoch={target_utc.isoformat()}"
+        )
+    return target_utc
+
+
 def probe_glonass_rinex_source(root: Path, request: GlonassRinexProbeRequest) -> dict[str, object]:
     selected = fetch_selected_broadcast_rinex(
         request.source_date,
@@ -61,6 +74,7 @@ def probe_glonass_rinex_source(root: Path, request: GlonassRinexProbeRequest) ->
 
 
 def build_glonass_rinex_scenario(root: Path, request: GlonassRinexRunnerRequest) -> dict[str, object]:
+    target_epoch = _validated_target_epoch(request)
     source = load_scenario(root / request.source_scenario_name)
     template = next(
         (s for s in source.constellation.satellites if s.satellite_id == request.template_satellite_id),
@@ -87,7 +101,7 @@ def build_glonass_rinex_scenario(root: Path, request: GlonassRinexRunnerRequest)
         source_name=cached.source_url,
         source_text=rinex_text,
         frame=source.frame,
-        target_epoch=request.target_epoch,
+        target_epoch=target_epoch,
         target_time_scale=source.time_scale,
         max_ephemeris_age_s=request.max_ephemeris_age_s,
         glonass_propagation_step_s=request.glonass_propagation_step_s,
@@ -118,7 +132,7 @@ def build_glonass_rinex_scenario(root: Path, request: GlonassRinexRunnerRequest)
         authority=(
             f"{selected.source_id} RINEX NAV -> Orekit RinexNavigationParser -> "
             "GLONASSNumericalPropagator -> DSST mean; "
-            f"target_epoch={request.target_epoch.isoformat()}; "
+            f"target_epoch={target_epoch.isoformat()}; "
             f"max_ephemeris_age_s={request.max_ephemeris_age_s}; "
             f"glonass_propagation_step_s={request.glonass_propagation_step_s}"
         ),
@@ -127,7 +141,7 @@ def build_glonass_rinex_scenario(root: Path, request: GlonassRinexRunnerRequest)
         source.model_dump(mode="json")
         | {
             "scenario_id": request.new_scenario_id,
-            "epoch": request.target_epoch.isoformat(),
+            "epoch": target_epoch.isoformat(),
             "constellation": ConstellationSpec(satellites=satellites, planes=()).model_dump(mode="json"),
             "maneuvers": [],
             "digital_twin": prior_twin.model_copy(update={"lineage": lineage}).model_dump(mode="json"),
@@ -153,19 +167,19 @@ def build_glonass_rinex_scenario(root: Path, request: GlonassRinexRunnerRequest)
         "cached_gzip": str(cached.gzip_path),
         "cached_rinex": str(cached.rinex_path),
         "cache_manifest": str(cached.manifest_path),
-        "target_epoch": request.target_epoch.isoformat(),
+        "target_epoch": target_epoch.isoformat(),
     }
 
 
 GLONASS_RINEX_CARD = """
 <div class="card" id="glonassRinexRunnerCard">
 <h3>RINEX NAV → GLONASS ScenarioConfig</h3>
-<p class="hint">Источник берётся из Settings. AUTO реально перебирает совместимые источники и возвращает журнал попыток; MANUAL fail-closed. Российские источники идут перед BKG/WHU. Probe скачивает и валидирует RINEX независимо от Orekit. Для runnable scenario modelling authority выбирается отдельно и явно.</p>
+<p class="hint">Источник берётся из Settings. AUTO реально перебирает совместимые источники и возвращает журнал попыток; MANUAL fail-closed. Российские источники идут перед BKG/WHU. Probe скачивает и валидирует RINEX независимо от Orekit. Modelling authority задаёт force model/frame/Orekit/spacecraft, но её старая эпоха не переносится: целевая эпоха относится к выбранным суткам RINEX.</p>
 <div class="grid">
-<label>Дата RINEX <input id="gloRinexDate" type="date"></label>
+<label>Дата RINEX <input id="gloRinexDate" type="date" onchange="syncGlonassRinexEpochToDate(true)"></label>
 <label>Modelling authority <select id="gloRinexAuthority" onchange="loadGlonassRinexAuthority()"><option value="">— выберите явно —</option></select></label>
 <label>Шаблон КА authority <select id="gloRinexTemplate"></select></label>
-<label>Целевая эпоха <input id="gloRinexEpoch" type="text" placeholder="2026-09-09T00:00:00Z"></label>
+<label>Целевая эпоха UTC <input id="gloRinexEpoch" type="text" placeholder="2026-09-11T12:00:00Z"></label>
 <label>Max age, s <input id="gloRinexAge" type="number" value="7200"></label>
 <label>GLONASS propagation step, s <input id="gloRinexStep" type="number" value="60"></label>
 <label>Новый scenario_id <input id="gloRinexScenarioId" value="glonass-rinex-derived"></label>
@@ -179,8 +193,10 @@ GLONASS_RINEX_CARD = """
 
 GLONASS_RINEX_SCRIPT = r"""
 function glonassRinexErrorDetail(d){if(!d)return 'RINEX runner failed';if(typeof d.detail==='string')return d.detail;if(d.detail!==undefined)return JSON.stringify(d.detail);return JSON.stringify(d);}
+function syncGlonassRinexEpochToDate(force=false){const day=gloRinexDate.value;if(!day)return;if(force||!gloRinexEpoch.value.trim())gloRinexEpoch.value=day+'T12:00:00Z';}
 function syncGlonassRinexTemplate(){
  if(!gloRinexDate.value)gloRinexDate.value=new Date(Date.now()-86400000).toISOString().slice(0,10);
+ syncGlonassRinexEpochToDate(false);
  const names=(typeof catalog!=='undefined'&&catalog&&catalog.scenarios)||[];
  const previous=gloRinexAuthority.value;
  gloRinexAuthority.replaceChildren(new Option('— выберите явно —',''),...names.map(x=>new Option(x,x)));
@@ -193,7 +209,7 @@ function syncGlonassRinexTemplate(){
 }
 async function loadGlonassRinexAuthority(){
  const name=gloRinexAuthority.value;gloRinexTemplate.replaceChildren();if(!name)return;
- try{const r=await fetch('/api/scenarios/'+encodeURIComponent(name));const d=await r.json();if(!r.ok)throw new Error(glonassRinexErrorDetail(d));const normalized=d.normalized||d;if(!normalized.orekit_sidecar_url)throw new Error('Выбранный modelling authority не содержит orekit_sidecar_url');const sats=(normalized.constellation||{}).satellites||[];gloRinexTemplate.replaceChildren(...sats.map(s=>new Option(s.satellite_id,s.satellite_id)));if(!gloRinexEpoch.value&&normalized.epoch)gloRinexEpoch.value=normalized.epoch;gloRinexStatus.textContent='AUTHORITY READY: '+name;gloRinexStatus.className='status ok';}
+ try{const r=await fetch('/api/scenarios/'+encodeURIComponent(name));const d=await r.json();if(!r.ok)throw new Error(glonassRinexErrorDetail(d));const normalized=d.normalized||d;if(!normalized.orekit_sidecar_url)throw new Error('Выбранный modelling authority не содержит orekit_sidecar_url');const sats=(normalized.constellation||{}).satellites||[];gloRinexTemplate.replaceChildren(...sats.map(s=>new Option(s.satellite_id,s.satellite_id)));syncGlonassRinexEpochToDate(false);gloRinexStatus.textContent='AUTHORITY READY: '+name+'; target epoch remains tied to RINEX date';gloRinexStatus.className='status ok';}
  catch(e){gloRinexAuthority.value='';gloRinexTemplate.replaceChildren();gloRinexStatus.textContent=String(e.message||e);gloRinexStatus.className='status danger';}
 }
 async function probeGlonassRinex(){
