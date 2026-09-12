@@ -10,11 +10,15 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Probe qualified GNSS sources
+      - name: Probe source contracts
         run: python scripts/probe_rf_sources.py
+      - name: Install packaged runtime
+        run: python -m pip install -e .
+      - name: Execute source adapters
+        run: python scripts/probe_rf_source_runtime.py
