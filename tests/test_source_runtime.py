@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gzip
 from datetime import date
 from pathlib import Path
 
@@ -138,12 +137,20 @@ def test_requested_day_validation_accepts_matching_daily_file() -> None:
     source_runtime._validate_requested_day(rinex, date(2026, 9, 11), "ok.rnx")
 
 
-def test_rinex2_glonass_broadcast_is_accepted_by_filename_and_header() -> None:
+def test_station_rinex2_glonass_filename_is_recognized() -> None:
     day = date(2026, 9, 11)
-    name = "Brdc2540.26g"
+    name = "zeck2540.26g.Z"
     assert source_runtime._looks_like_rinex_name(name)
+    match = source_runtime._rinex2_match(name)
+    assert match is not None
+    assert match.group("kind").lower() == "g"
     source_runtime._validate_runtime_rinex_system(_rinex2_glonass(day), "GLONASS", source_name=name)
-    source_runtime._validate_requested_day(_rinex2_glonass(day), day, name)
+
+
+def test_unix_compress_payload_is_decoded_as_ascii(monkeypatch) -> None:
+    expected = _rinex2_glonass(date(2026, 9, 11))
+    monkeypatch.setattr(source_runtime.unlzw3, "unlzw", lambda payload: expected.decode("ascii"))
+    assert source_runtime._decode_rinex_payload(b"\x1f\x9dplaceholder", "zeck2540.26g.Z") == expected
 
 
 def test_iac_mcc_brdc_selects_exact_glonass_daily_file(tmp_path: Path, monkeypatch) -> None:
@@ -169,39 +176,70 @@ def test_iac_mcc_brdc_selects_exact_glonass_daily_file(tmp_path: Path, monkeypat
     ]
 
 
-def test_whu_discovers_real_mixed_navigation_directory(tmp_path: Path, monkeypatch) -> None:
+def test_whu_discovers_real_glonass_navigation_directory(tmp_path: Path, monkeypatch) -> None:
     day = date(2026, 9, 11)
     setting = next(item for item in DEFAULT_SOURCE_SETTINGS.sources if item.source_id == "igs_whu")
-    payload = gzip.compress(_rinex3_glonass(day))
     calls: list[str] = []
+    monkeypatch.setattr(source_runtime.unlzw3, "unlzw", lambda payload: _rinex2_glonass(day).decode("ascii"))
 
     def fake_fetch(url: str, *, timeout_s: float):
         calls.append(url)
         if url.endswith("/2026/254/"):
             return ReviewedHttpResponse(raw=b"26g\n26m\n26n\n", content_type=None, transport="curl")
-        if url.endswith("/2026/254/26m/"):
-            return ReviewedHttpResponse(
-                raw=b"TEST00AAA_R_20262540000_01D_MM.rnx.gz\n",
-                content_type=None,
-                transport="curl",
-            )
-        if url.endswith("/TEST00AAA_R_20262540000_01D_MM.rnx.gz"):
-            return ReviewedHttpResponse(raw=payload, content_type="application/gzip", transport="curl")
+        if url.endswith("/2026/254/26g/"):
+            return ReviewedHttpResponse(raw=b"bill2540.26g.Z\n", content_type=None, transport="curl")
+        if url.endswith("/bill2540.26g.Z"):
+            return ReviewedHttpResponse(raw=b"\x1f\x9dcompressed", content_type=None, transport="curl")
         raise AssertionError(url)
 
     monkeypatch.setattr(source_runtime, "fetch_reviewed_url", fake_fetch)
     cached = source_runtime._fetch_configured_whu(day, "GLONASS", tmp_path, 30.0, setting)
-    assert cached.source_filename.endswith("_MM.rnx.gz")
+    assert cached.source_filename == "bill2540.26g.Z"
+    assert cached.rinex_path.name == "bill2540.26g"
+    assert cached.rinex_path.read_bytes() == _rinex2_glonass(day)
     assert calls[0].endswith("/2026/254/")
-    assert "/26m/" in calls[1]
+    assert "/26g/" in calls[1]
+    assert not any("/26m/" in call for call in calls)
 
 
 def test_fcnd_live_schema_keys_are_recognized() -> None:
     day = date(2026, 9, 11)
     record = {
         "pt_time_begin": "2026-09-11 23:59:50.000051",
-        "pk_file_name": "BRDC2540.26g",
-        "c_meta_file": {"CollectionShortName": "example"},
+        "pk_file_name": "zeck2540.26g.Z",
+        "c_meta_file": {"CollectionShortName": "RAN_gnss_data_daily_30sec"},
     }
-    assert source_runtime._fcnd_record_name(record) == "BRDC2540.26g"
+    assert source_runtime._fcnd_record_name(record) == "zeck2540.26g.Z"
     assert source_runtime._fcnd_record_time(record, day) == "2026-09-11 23:59:50.000051"
+    assert source_runtime._fcnd_candidate_matches_system("zeck2540.26g.Z", "GLONASS")
+    assert not source_runtime._fcnd_candidate_matches_system("zeck2540.26n.Z", "GLONASS")
+
+
+def test_fcnd_queries_qualified_collection_and_downloads_glonass(tmp_path: Path, monkeypatch) -> None:
+    day = date(2026, 9, 11)
+    setting = next(item for item in DEFAULT_SOURCE_SETTINGS.sources if item.source_id == "fcnd_api")
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(source_runtime.unlzw3, "unlzw", lambda payload: _rinex2_glonass(day).decode("ascii"))
+
+    def fake_list(self, **kwargs):
+        calls.append(("list", kwargs.get("meta_collections")))
+        assert kwargs["meta_collections"] == (134,)
+        return [
+            {
+                "pt_time_begin": "2026-09-11 00:00:00.000134",
+                "pk_file_name": "zeck2540.26g.Z",
+                "fk_meta_collection": "134",
+            }
+        ]
+
+    def fake_download(self, *, time_begin, file_name):
+        calls.append(("download", file_name))
+        assert time_begin == "2026-09-11 00:00:00.000134"
+        return b"\x1f\x9dcompressed"
+
+    monkeypatch.setattr(source_runtime.FcndApiClient, "list_data", fake_list)
+    monkeypatch.setattr(source_runtime.FcndApiClient, "download_datafile", fake_download)
+    cached = source_runtime._fetch_fcnd_rinex(day, "GLONASS", tmp_path, 30.0, setting)
+    assert cached.source_filename == "zeck2540.26g.Z"
+    assert cached.rinex_path.name == "zeck2540.26g"
+    assert calls == [("list", (134,)), ("download", "zeck2540.26g.Z")]
