@@ -40,6 +40,21 @@ def main() -> None:
             iac.rinex_path.stat().st_size,
         )
 
+        fcnd = _fetch_fcnd_rinex(
+            day,
+            "GLONASS",
+            root / "fcnd",
+            60.0,
+            required_setting("fcnd_api"),
+        )
+        print(
+            "FCND_RUNTIME_OK",
+            fcnd.source_filename,
+            fcnd.source_url,
+            fcnd.rinex_sha256,
+            fcnd.rinex_path.stat().st_size,
+        )
+
         whu = _fetch_configured_whu(
             day,
             "GLONASS",
@@ -54,25 +69,6 @@ def main() -> None:
             whu.rinex_sha256,
             whu.rinex_path.stat().st_size,
         )
-
-        try:
-            fcnd = _fetch_fcnd_rinex(
-                day,
-                "GLONASS",
-                root / "fcnd",
-                30.0,
-                required_setting("fcnd_api"),
-            )
-        except (OSError, ValueError) as exc:
-            print("FCND_RUNTIME_NOT_YET_QUALIFIED", exc)
-        else:
-            print(
-                "FCND_RUNTIME_OK",
-                fcnd.source_filename,
-                fcnd.source_url,
-                fcnd.rinex_sha256,
-                fcnd.rinex_path.stat().st_size,
-            )
 
 
 if __name__ == "__main__":
