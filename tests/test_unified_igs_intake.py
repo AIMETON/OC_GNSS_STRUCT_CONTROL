@@ -113,14 +113,17 @@ def test_baseline_identity_includes_modelling_authority_hash() -> None:
     assert scenario_name == scenario_id + ".yaml"
 
 
-def test_low_level_source_cards_route_only_supported_adapters_to_expert() -> None:
+def test_low_level_source_cards_remove_obsolete_duplicate_almanac_paths() -> None:
     page = render_preview_page_for_test()
-    assert "glonassRinexRunnerCard" in page
-    assert "iacGlonassRunnerCard" in page
+    assert 'id="glonassRinexRunnerCard"' in page
+    assert 'id="iacGlonassConstellationCard"' in page
+    assert 'id="iacGlonassRunnerCard"' not in page
+    assert 'id="glonassAlmanacCard"' not in page
     assert "NAVCEN GPS YUMA/SEM → runnable scenario" not in page
     assert "ГЛОНАСС ИАЦ + GPS NAVCEN → полная runnable группировка" not in page
     assert "/api/navcen-gps-runner/" not in page
     assert "/api/mixed-gnss-runner/" not in page
+    assert "/api/glonass-almanac/" not in page
 
 
 def test_operator_workspace_contract_is_mission_based() -> None:
