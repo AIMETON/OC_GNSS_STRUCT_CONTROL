@@ -180,7 +180,7 @@ GLONASS_RINEX_CARD = """
 GLONASS_RINEX_SCRIPT = r"""
 function glonassRinexErrorDetail(d){if(!d)return 'RINEX runner failed';if(typeof d.detail==='string')return d.detail;if(d.detail!==undefined)return JSON.stringify(d.detail);return JSON.stringify(d);}
 function syncGlonassRinexTemplate(){
- if(!gloRinexDate.value)gloRinexDate.value=new Date().toISOString().slice(0,10);
+ if(!gloRinexDate.value)gloRinexDate.value=new Date(Date.now()-86400000).toISOString().slice(0,10);
  const names=(typeof catalog!=='undefined'&&catalog&&catalog.scenarios)||[];
  const previous=gloRinexAuthority.value;
  gloRinexAuthority.replaceChildren(new Option('— выберите явно —',''),...names.map(x=>new Option(x,x)));
