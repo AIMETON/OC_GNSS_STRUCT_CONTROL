@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from constellation_control.adapters.galileo_gsc_almanac import (
     GSC_ALMANAC_INDEX_URL,
+    GSC_DAILY_FILE_PREFIX,
     GalileoGscAlmanac,
     fetch_latest_galileo_gsc_almanac,
     parse_galileo_gsc_almanac,
@@ -59,7 +60,7 @@ def _payload(almanac: GalileoGscAlmanac) -> dict[str, object]:
 GALILEO_GSC_CARD = r"""
 <div class="card" id="galileoGscCard">
   <h3>Galileo — официальный GSC Almanac</h3>
-  <p class="hint">Official European GNSS Service Centre XML. Online выбирает последний XML только с разрешённого GSC product index. Offline принимает сохранённый XML. aSqRoot трактуется как поправка к √A для номинальной полуоси 29 600 км; deltai — поправка к 56°; semicircle = π rad. SHA-256 сохраняется.</p>
+  <p class="hint">Official European GNSS Service Centre XML. Online сначала проверяет официальный прямой daily XML вида /sites/default/files/sites/all/files/YYYY-MM-DD.xml за последние дни и только затем product index. Это сохраняет работу, когда /gsc-products/almanac недоступен, а сам XML открывается. Offline принимает сохранённый XML. aSqRoot трактуется как поправка к √A для номинальной полуоси 29 600 км; deltai — поправка к 56°; semicircle = π rad. SHA-256 сохраняется.</p>
   <div class="grid">
     <button onclick="fetchGalileoGscOnline()">Загрузить GSC online / Fetch GSC</button>
     <label>Offline XML <input id="galileoGscFile" type="file" accept=".xml,text/xml,application/xml"></label>
@@ -87,7 +88,7 @@ function showGalileoGsc(d){
   galileoGscPreview.textContent=lines.join('\n');
 }
 async function fetchGalileoGscOnline(){
-  galileoGscStatusMsg('Загрузка GSC… / Fetching GSC…');
+  galileoGscStatusMsg('Загрузка GSC direct daily / index…');
   const r=await fetch('/api/galileo-gsc/online');
   const d=await r.json();
   if(!r.ok){galileoGscStatusMsg(d.detail||'GSC fetch failed','danger');return;}
@@ -108,7 +109,7 @@ async function previewGalileoGscOffline(){
 def install_galileo_gsc_routes(app: FastAPI) -> None:
     @app.get("/api/galileo-gsc/source")
     def source() -> dict[str, str]:
-        return {"index_url": GSC_ALMANAC_INDEX_URL}
+        return {"index_url": GSC_ALMANAC_INDEX_URL, "daily_file_prefix": GSC_DAILY_FILE_PREFIX}
 
     @app.get("/api/galileo-gsc/online")
     def online() -> dict[str, object]:
