@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 _SETTINGS_ENV = "OC_GNSS_SOURCE_SETTINGS"
 _DEFAULT_SETTINGS_PATH = Path("runtime/settings/source_endpoints.json")
+_OLD_WHU_TEMPLATE = "{base_url}/{year}/{doy}/{yy}p/"
+_NEW_WHU_TEMPLATE = "{base_url}/{year}/{doy}/"
 GNSSSystem = Literal["GLONASS", "GPS", "Galileo", "BeiDou"]
 SourceSelectionMode = Literal["auto", "manual"]
 
@@ -48,13 +50,13 @@ class SourceSelectionPolicy(BaseModel):
 
 
 class SourceSettingsDocument(BaseModel):
-    version: int = 3
+    version: int = 4
     sources: list[SourceEndpointSetting]
     selection: dict[GNSSSystem, SourceSelectionPolicy] = Field(default_factory=dict)
 
 
 DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
-    version=3,
+    version=4,
     sources=[
         SourceEndpointSetting(
             source_id="igs_bkg",
@@ -69,8 +71,11 @@ DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
             source_id="igs_whu",
             label="IGS Wuhan University daily navigation",
             base_url="ftp://igs.gnsswhu.cn/pub/gps/data/daily",
-            request_template="{base_url}/{year}/{doy}/{yy}p/",
-            notes="Directory is discovered at runtime; do not hard-code a filename.",
+            request_template=_NEW_WHU_TEMPLATE,
+            notes=(
+                "Runtime lists the daily root first, then discovers the real YYm/YYg/YYn navigation "
+                "directory. No YYp directory is assumed."
+            ),
             systems=["GLONASS", "GPS", "Galileo", "BeiDou"],
             capabilities=["broadcast_rinex_nav"],
         ),
@@ -148,11 +153,10 @@ DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
             source_id="iac_ftp_archive",
             label="IAC GLONASS FTP archive",
             base_url="ftp://ftp.glonass-iac.ru",
-            request_template="{base_url}/{directory}/",
+            request_template="{base_url}/MCC/BRDC/{year}/",
             notes=(
-                "Official Applied Consumer Centre FTP archive. Anonymous FTP on port 21: login anonymous, "
-                "password anonymous. MCC/IGS products are discovered at runtime and accepted as broadcast "
-                "RINEX NAV only after strict format/system/date validation."
+                "Official Applied Consumer Centre anonymous FTP archive. Runtime selects the exact daily "
+                "MCC/BRDC/{year}/BrdcDDD0.YYg (GLONASS) or .YYn (GPS) file and validates date/system."
             ),
             systems=["GLONASS", "GPS"],
             capabilities=["archive_discovery", "broadcast_rinex_nav"],
@@ -163,8 +167,8 @@ DEFAULT_SOURCE_SETTINGS = SourceSettingsDocument(
             base_url="https://fcnd.ru",
             request_template="{base_url}/api/getData/",
             notes=(
-                "Russian Federal Coordinate Network Data Centre API. The runtime queries documented getData "
-                "catalogue/datafile endpoints and accepts a candidate only after strict RINEX NAV validation."
+                "Russian Federal Coordinate Network Data Centre API. Runtime uses documented getFilter/getData "
+                "metadata and validates downloaded RINEX navigation data before use."
             ),
             systems=["GLONASS", "GPS"],
             capabilities=["gnss_data_api", "broadcast_rinex_nav"],
@@ -227,6 +231,22 @@ def _upgrade_document(document: SourceSettingsDocument) -> SourceSettingsDocumen
             upgraded.sources.append(default_source.model_copy(deep=True))
             existing_ids.add(default_source.source_id)
 
+    # 0.2.14 shipped a WHU YYp directory assumption. The live daily root exposes YYm/YYg/YYn,
+    # so migrate only that exact old default and leave operator-customized templates untouched.
+    whu = next((item for item in upgraded.sources if item.source_id == "igs_whu"), None)
+    if whu is not None and whu.request_template == _OLD_WHU_TEMPLATE:
+        whu.request_template = _NEW_WHU_TEMPLATE
+        whu.notes = next(
+            item.notes for item in DEFAULT_SOURCE_SETTINGS.sources if item.source_id == "igs_whu"
+        )
+
+    iac_ftp = next((item for item in upgraded.sources if item.source_id == "iac_ftp_archive"), None)
+    if iac_ftp is not None and iac_ftp.request_template == "{base_url}/{directory}/":
+        iac_ftp.request_template = "{base_url}/MCC/BRDC/{year}/"
+        iac_ftp.notes = next(
+            item.notes for item in DEFAULT_SOURCE_SETTINGS.sources if item.source_id == "iac_ftp_archive"
+        )
+
     for system, default_policy in DEFAULT_SOURCE_SETTINGS.selection.items():
         policy = upgraded.selection.get(system)
         if policy is None:
@@ -234,7 +254,7 @@ def _upgrade_document(document: SourceSettingsDocument) -> SourceSettingsDocumen
             continue
         if policy.mode == "auto":
             policy.auto_order = _merge_auto_order(policy.auto_order, default_policy.auto_order)
-    upgraded.version = 3
+    upgraded.version = 4
     return upgraded
 
 
@@ -419,7 +439,7 @@ function collectSourceSettings(){
   syncSelectionFromUi();
   const rows=Array.from(document.querySelectorAll('.source-setting-row'));
   const sources=rows.map((row,i)=>({...sourceSettingsDocument.sources[i],source_id:row.querySelector('.src-id').value.trim(),label:row.querySelector('.src-label').value.trim(),enabled:row.querySelector('.src-enabled').checked,base_url:row.querySelector('.src-base').value.trim(),request_template:row.querySelector('.src-template').value,notes:row.querySelector('.src-notes').value.trim()}));
-  return {version:sourceSettingsDocument?.version||3,sources,selection:sourceSettingsDocument.selection||{}};
+  return {version:sourceSettingsDocument?.version||4,sources,selection:sourceSettingsDocument.selection||{}};
 }
 async function saveSourceSettings(){
   const button=document.getElementById('sourceSettingsSave'),status=document.getElementById('sourceSettingsStatus');button.disabled=true;
