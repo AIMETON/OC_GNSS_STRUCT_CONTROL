@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlencode, urljoin
 
+import unlzw3
+
 from constellation_control.adapters.bkg_rinex_nav import (
     CachedRinexNav,
     _parse_directory_listing,
@@ -50,7 +52,10 @@ _SYSTEM_SUFFIX = {
     "BeiDou": "CN",
 }
 _RINEX3_FILE_RE = re.compile(r"(?i)\.rnx(?:\.gz)?$")
-_RINEX2_NAV_RE = re.compile(r"(?i)^brdc(?P<doy>\d{3})0\.(?P<yy>\d{2})(?P<kind>[gfnl])(?:\.z)?$")
+_RINEX2_NAV_RE = re.compile(
+    r"(?i)^(?P<prefix>[a-z0-9_-]+?)(?P<doy>\d{3})0\.(?P<yy>\d{2})(?P<kind>[gfnl])(?:\.(?:z|gz))?$"
+)
+_FCND_NAV_COLLECTIONS = (134, 58, 56, 148)
 
 
 def _safe_name(value: str) -> str | None:
@@ -60,18 +65,26 @@ def _safe_name(value: str) -> str | None:
     return name
 
 
+def _rinex2_match(name: str) -> re.Match[str] | None:
+    return _RINEX2_NAV_RE.match(name)
+
+
 def _looks_like_rinex_name(name: str) -> bool:
     lower = name.lower()
-    return bool(_RINEX3_FILE_RE.search(name) or _RINEX2_NAV_RE.match(name) or lower.endswith((".nav", ".nav.gz")))
+    return bool(_RINEX3_FILE_RE.search(name) or _rinex2_match(name) or lower.endswith((".nav", ".nav.gz")))
 
 
 def _decode_rinex_payload(payload: bytes, file_name: str) -> bytes:
     lower = file_name.lower()
     if lower.endswith(".z") and not lower.endswith(".gz"):
-        raise ValueError(
-            f"{file_name}: Unix-compress .Z payload is not accepted by the portable runtime; "
-            "use an uncompressed or .gz source candidate"
-        )
+        try:
+            decoded = unlzw3.unlzw(payload)
+        except Exception as exc:  # noqa: BLE001 - decompressor boundary
+            raise ValueError(f"{file_name}: invalid Unix-compress .Z RINEX payload") from exc
+        try:
+            return decoded.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError(f"{file_name}: decompressed .Z RINEX payload is not ASCII") from exc
     if lower.endswith(".gz") or payload[:2] == b"\x1f\x8b":
         try:
             return gzip.decompress(payload)
@@ -101,7 +114,7 @@ def _validate_runtime_rinex_system(raw: bytes, system: str, *, source_name: str)
     if "RINEX VERSION / TYPE" not in head or "END OF HEADER" not in head:
         raise ValueError("RINEX navigation header is incomplete")
     first_upper = first.upper()
-    name_match = _RINEX2_NAV_RE.match(source_name)
+    name_match = _rinex2_match(source_name)
     glonass_file_type = bool(name_match and name_match.group("kind").lower() == "g")
     if "NAV" not in first_upper:
         raise ValueError("downloaded RINEX file is not navigation data")
@@ -139,9 +152,13 @@ def _store_external_rinex(
     doy = source_date.timetuple().tm_yday
     directory = cache_root.resolve() / provider_key / "brdc" / f"{source_date.year:04d}" / f"{doy:03d}"
     directory.mkdir(parents=True, exist_ok=True)
-    normalized_name = source_file_name
-    if not normalized_name.lower().endswith(".gz"):
-        normalized_name += ".gz"
+
+    source_lower = source_file_name.lower()
+    if source_lower.endswith(".z") and not source_lower.endswith(".gz"):
+        cache_base_name = source_file_name[:-2]
+    else:
+        cache_base_name = source_file_name
+    normalized_name = cache_base_name if cache_base_name.lower().endswith(".gz") else cache_base_name + ".gz"
     gzip_path = directory / normalized_name
     rinex_path = directory / normalized_name.removesuffix(".gz")
     manifest_path = directory / (normalized_name + ".manifest.json")
@@ -258,11 +275,12 @@ def _fetch_configured_whu(
     root_response = fetch_reviewed_url(day_root, timeout_s=timeout_s)
     subdirs = {_safe_name(name) for name in _parse_directory_listing(root_response.raw)}
     yy = day.year % 100
-    preferred = [f"{yy:02d}m"]
     if system == "GLONASS":
-        preferred.append(f"{yy:02d}g")
+        preferred = [f"{yy:02d}g"]
     elif system == "GPS":
-        preferred.append(f"{yy:02d}n")
+        preferred = [f"{yy:02d}n"]
+    else:
+        raise ValueError(f"WHU daily legacy-navigation runtime is not qualified for {system}")
     available = [name for name in preferred if name in subdirs]
     if not available:
         raise ValueError(
@@ -275,13 +293,7 @@ def _fetch_configured_whu(
         directory_url = urljoin(day_root, subdir + "/")
         listing = fetch_reviewed_url(directory_url, timeout_s=timeout_s)
         names = [name for raw in _parse_directory_listing(listing.raw) if (name := _safe_name(raw))]
-        if subdir.endswith("m"):
-            candidates = sorted(
-                (name for name in names if name.lower().endswith(".rnx.gz") and "_01d_" in name.lower()),
-                key=lambda name: ("_mm.rnx.gz" not in name.lower(), name),
-            )
-        else:
-            candidates = sorted(name for name in names if _looks_like_rinex_name(name))
+        candidates = sorted(name for name in names if _looks_like_rinex_name(name))
         for name in candidates[:24]:
             try:
                 url = urljoin(directory_url, name)
@@ -345,6 +357,14 @@ def _fcnd_candidate_score(name: str, record: dict[str, Any], day: date) -> tuple
     )
 
 
+def _fcnd_candidate_matches_system(name: str, system: str) -> bool:
+    match = _rinex2_match(name)
+    if match is None:
+        return True
+    expected_kind = {"GLONASS": "g", "GPS": "n"}.get(system)
+    return expected_kind is not None and match.group("kind").lower() == expected_kind
+
+
 def _fetch_fcnd_rinex(
     day: date,
     system: str,
@@ -352,51 +372,58 @@ def _fetch_fcnd_rinex(
     timeout_s: float,
     setting: SourceEndpointSetting,
 ) -> CachedRinexNav:
+    if system not in {"GLONASS", "GPS"}:
+        raise ValueError(f"FCND broadcast-navigation runtime is not qualified for {system}")
     client = FcndApiClient(base_url=setting.base_url, timeout_s=timeout_s)
-    catalogue = client.list_data(
-        time_begin=f"{day.strftime('%d-%m-%Y')} 00:00:00",
-        time_end=f"{day.strftime('%d-%m-%Y')} 23:59:59",
-        limit=500,
-    )
-    candidates: list[tuple[str, str, dict[str, Any]]] = []
-    for record in _walk_json_dicts(catalogue):
-        name = _fcnd_record_name(record)
-        if name is None or not _looks_like_rinex_name(name):
-            continue
-        text = json.dumps(record, ensure_ascii=False).lower()
-        if name.lower().endswith(("o", "o.gz", ".obs", ".obs.gz")) or "observation" in text or "измерен" in text:
-            continue
-        candidates.append((name, _fcnd_record_time(record, day), record))
-    if not candidates:
-        raise ValueError(
-            "FCND catalogue is reachable, but no broadcast-navigation RINEX candidate was identified "
-            "for the requested day"
-        )
-    candidates.sort(key=lambda item: _fcnd_candidate_score(item[0], item[2], day), reverse=True)
-
+    begin = f"{day.strftime('%d-%m-%Y')} 00:00:00"
+    end = f"{day.strftime('%d-%m-%Y')} 23:59:59"
     errors: list[str] = []
-    for name, time_begin, _record in candidates[:24]:
-        try:
-            payload = client.download_datafile(time_begin=time_begin, file_name=name)
-            rinex = _decode_rinex_payload(payload, name)
-            _validate_runtime_rinex_system(rinex, system, source_name=name)
-            _validate_requested_day(rinex, day, name)
-            query = urlencode([("datafile[time_begin]", time_begin), ("datafile[file_name]", name)])
-            source_url = setting.base_url.rstrip("/") + "/api/getData/?" + query
-            return _store_external_rinex(
-                provider_key="fcnd",
-                provider="Russian Federal Coordinate Network Data Centre (FCND)",
-                source_url=source_url,
-                source_file_name=name,
-                source_payload=payload,
-                rinex=rinex,
-                source_date=day,
-                system=system,
-                transport="fcnd-api",
-                cache_root=cache_root,
-            )
-        except (OSError, ValueError) as exc:
-            errors.append(f"{name}: {exc}")
+
+    for collection_id in _FCND_NAV_COLLECTIONS:
+        catalogue = client.list_data(
+            time_begin=begin,
+            time_end=end,
+            meta_collections=(collection_id,),
+            limit=500,
+        )
+        candidates: list[tuple[str, str, dict[str, Any]]] = []
+        for record in _walk_json_dicts(catalogue):
+            name = _fcnd_record_name(record)
+            if name is None or not _looks_like_rinex_name(name):
+                continue
+            if not _fcnd_candidate_matches_system(name, system):
+                continue
+            candidates.append((name, _fcnd_record_time(record, day), record))
+        candidates.sort(key=lambda item: _fcnd_candidate_score(item[0], item[2], day), reverse=True)
+
+        for name, time_begin, _record in candidates[:24]:
+            try:
+                payload = client.download_datafile(time_begin=time_begin, file_name=name)
+                rinex = _decode_rinex_payload(payload, name)
+                _validate_runtime_rinex_system(rinex, system, source_name=name)
+                _validate_requested_day(rinex, day, name)
+                query = urlencode([("datafile[time_begin]", time_begin), ("datafile[file_name]", name)])
+                source_url = setting.base_url.rstrip("/") + "/api/getData/?" + query
+                return _store_external_rinex(
+                    provider_key="fcnd",
+                    provider=f"Russian FCND collection {collection_id}",
+                    source_url=source_url,
+                    source_file_name=name,
+                    source_payload=payload,
+                    rinex=rinex,
+                    source_date=day,
+                    system=system,
+                    transport="fcnd-api",
+                    cache_root=cache_root,
+                )
+            except (OSError, ValueError) as exc:
+                errors.append(f"collection={collection_id} {name}: {exc}")
+
+    if not errors:
+        raise ValueError(
+            "FCND is reachable, but qualified navigation collections 134/58/56/148 contain no "
+            f"{system} broadcast RINEX candidate for {day.isoformat()}"
+        )
     raise ValueError("FCND candidates did not yield valid broadcast RINEX NAV: " + "; ".join(errors[:8]))
 
 
@@ -428,9 +455,10 @@ def _fetch_iac_ftp_rinex(
         matching_day = [
             name
             for name in names
-            if (match := _RINEX2_NAV_RE.match(name))
+            if (match := _rinex2_match(name))
             and int(match.group("doy")) == day.timetuple().tm_yday
             and int(match.group("yy")) == day.year % 100
+            and match.group("kind").lower() == {"GLONASS": "g", "GPS": "n"}.get(system)
         ]
         candidates.extend(matching_day)
     if not candidates:
