@@ -10,6 +10,7 @@ from constellation_control.adapters import bkg_rinex_nav
 from constellation_control.adapters.reviewed_http_fetch import ReviewedHttpResponse
 from constellation_control.preview.glonass_rinex_runner import (
     GlonassRinexRunnerRequest,
+    _orekit_safe_rinex_text,
     _validated_target_epoch,
 )
 from constellation_control.preview.gravity_release_app import render_preview_page_for_test
@@ -74,6 +75,36 @@ def test_bkg_glonass_download_is_cached_with_hashes(tmp_path: Path, monkeypatch)
     assert cached_again.source_sha256 == cached.source_sha256
     assert cached_again.rinex_sha256 == cached.rinex_sha256
     assert cached_again.transport == "cache"
+
+
+def test_rinex_header_non_ascii_metadata_is_sanitized_for_orekit(tmp_path: Path) -> None:
+    path = tmp_path / "Brdc2540.26g"
+    header = (
+        b"     2.11           GLONASS NAV DATA                         RINEX VERSION / TYPE\n"
+        b"IAC comment with UTF-8 degree \xc2\xb0 marker                    COMMENT\n"
+        b"                                                            END OF HEADER\n"
+    )
+    body = b" 1 26  9 11 12  0  0.0 0.0 0.0 0.0\n"
+    path.write_bytes(header + body)
+
+    text = _orekit_safe_rinex_text(path)
+
+    assert text.encode("ascii")
+    assert "END OF HEADER" in text
+    assert "degree    marker" in text
+    assert body.decode("ascii") in text
+    assert len(text.encode("ascii")) == len(header + body)
+
+
+def test_rinex_non_ascii_navigation_record_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "bad.26g"
+    path.write_bytes(
+        b"     2.11           GLONASS NAV DATA                         RINEX VERSION / TYPE\n"
+        b"                                                            END OF HEADER\n"
+        b" 1 26  9 11 12  0  0.0 \xc2\xb0 0.0 0.0\n"
+    )
+    with pytest.raises(ValueError, match="non-ASCII byte in RINEX navigation records"):
+        _orekit_safe_rinex_text(path)
 
 
 def test_rinex_target_epoch_must_be_timezone_aware() -> None:

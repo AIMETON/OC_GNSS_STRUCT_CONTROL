@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
 from html.parser import HTMLParser
 from math import pi, radians, sqrt
 from urllib.parse import urljoin, urlparse
@@ -12,6 +13,7 @@ from constellation_control.adapters.reviewed_http_fetch import fetch_reviewed_ur
 
 GSC_ALMANAC_INDEX_URL = "https://www.gsc-europa.eu/gsc-products/almanac"
 GSC_FILE_PREFIX = "https://www.gsc-europa.eu/sites/default/files/"
+GSC_DAILY_FILE_PREFIX = "https://www.gsc-europa.eu/sites/default/files/sites/all/files/"
 GALILEO_NOMINAL_SEMI_MAJOR_AXIS_M = 29_600_000.0
 GALILEO_REFERENCE_INCLINATION_RAD = radians(56.0)
 
@@ -67,6 +69,10 @@ class GalileoGscAlmanacRecord:
         return GALILEO_REFERENCE_INCLINATION_RAD + self.delta_inclination_semicircles * pi
 
     @property
+    def delta_inclination_rad(self) -> float:
+        return self.delta_inclination_semicircles * pi
+
+    @property
     def raan_rad(self) -> float:
         return self.raan_semicircles * pi
 
@@ -82,6 +88,10 @@ class GalileoGscAlmanacRecord:
     def mean_anomaly_rad(self) -> float:
         return self.mean_anomaly_semicircles * pi
 
+    @property
+    def healthy(self) -> bool:
+        return self.status_e1b == 0 and self.status_e5a == 0 and self.status_e5b == 0
+
 
 @dataclass(frozen=True)
 class GalileoGscAlmanac:
@@ -89,6 +99,7 @@ class GalileoGscAlmanac:
     source_filename: str
     source_sha256: str
     records: tuple[GalileoGscAlmanacRecord, ...]
+    issue_date_utc: datetime | None = None
     authority_note: str = (
         "Official European GNSS Service Centre Galileo almanac XML; OS SIS ICD almanac semantics are preserved explicitly"
     )
@@ -136,6 +147,10 @@ def _candidate_sort_key(url: str) -> tuple[int, str]:
     return 0, ""
 
 
+def gsc_daily_almanac_url(day: date) -> str:
+    return f"{GSC_DAILY_FILE_PREFIX}{day.isoformat()}.xml"
+
+
 def discover_latest_gsc_almanac_url(index_html: str) -> str:
     parser = _LinkParser()
     parser.feed(index_html)
@@ -159,6 +174,48 @@ def discover_latest_gsc_almanac_url(index_html: str) -> str:
     return max(candidates, key=_candidate_sort_key)
 
 
+def _record_fields(element: ElementTree.Element) -> dict[str, str] | None:
+    direct = {_local_name(child.tag): (child.text or "").strip() for child in list(element)}
+    if "SVID" not in direct:
+        return None
+
+    fields: dict[str, str] = {}
+    for node in element.iter():
+        if node is element:
+            continue
+        name = _local_name(node.tag)
+        if name not in _REQUIRED_FIELDS:
+            continue
+        value = (node.text or "").strip()
+        if not value:
+            continue
+        existing = fields.get(name)
+        if existing is not None and existing != value:
+            raise ValueError(f"Galileo GSC record contains conflicting {name} values")
+        fields[name] = value
+    return fields
+
+
+def _issue_date_utc(root: ElementTree.Element) -> datetime | None:
+    values = [
+        (node.text or "").strip()
+        for node in root.iter()
+        if _local_name(node.tag) == "issueDate" and (node.text or "").strip()
+    ]
+    if not values:
+        return None
+    if len(set(values)) != 1:
+        raise ValueError("Galileo GSC XML contains conflicting issueDate values")
+    text = values[0]
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"invalid Galileo GSC issueDate: {text!r}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("Galileo GSC issueDate must include an explicit UTC offset")
+    return parsed.astimezone(UTC)
+
+
 def parse_galileo_gsc_almanac(
     filename: str,
     xml_text: str,
@@ -176,31 +233,32 @@ def parse_galileo_gsc_almanac(
     except ElementTree.ParseError as exc:
         raise ValueError("Galileo GSC XML is invalid") from exc
 
+    issue_date = _issue_date_utc(root)
     records: list[GalileoGscAlmanacRecord] = []
     for element in root.iter():
-        children = {_local_name(child.tag): (child.text or "").strip() for child in list(element)}
-        if "SVID" not in children:
+        fields = _record_fields(element)
+        if fields is None:
             continue
-        missing = [field for field in _REQUIRED_FIELDS if field not in children]
+        missing = [field for field in _REQUIRED_FIELDS if field not in fields]
         if missing:
             raise ValueError("Galileo GSC record missing fields: " + ", ".join(missing))
         record = GalileoGscAlmanacRecord(
-            svid=_integer(children["SVID"], "SVID"),
-            delta_sqrt_a_m_sqrt=_number(children["aSqRoot"], "aSqRoot"),
-            eccentricity=_number(children["ecc"], "ecc"),
-            delta_inclination_semicircles=_number(children["deltai"], "deltai"),
-            raan_semicircles=_number(children["omega0"], "omega0"),
-            raan_rate_semicircles_s=_number(children["omegaDot"], "omegaDot"),
-            argument_of_perigee_semicircles=_number(children["w"], "w"),
-            mean_anomaly_semicircles=_number(children["m0"], "m0"),
-            af0_s=_number(children["af0"], "af0"),
-            af1_s_s=_number(children["af1"], "af1"),
-            iod=_integer(children["iod"], "iod"),
-            t0a_s=_number(children["t0a"], "t0a"),
-            wna_mod4=_integer(children["wna"], "wna"),
-            status_e5a=_integer(children["statusE5a"], "statusE5a"),
-            status_e5b=_integer(children["statusE5b"], "statusE5b"),
-            status_e1b=_integer(children["statusE1B"], "statusE1B"),
+            svid=_integer(fields["SVID"], "SVID"),
+            delta_sqrt_a_m_sqrt=_number(fields["aSqRoot"], "aSqRoot"),
+            eccentricity=_number(fields["ecc"], "ecc"),
+            delta_inclination_semicircles=_number(fields["deltai"], "deltai"),
+            raan_semicircles=_number(fields["omega0"], "omega0"),
+            raan_rate_semicircles_s=_number(fields["omegaDot"], "omegaDot"),
+            argument_of_perigee_semicircles=_number(fields["w"], "w"),
+            mean_anomaly_semicircles=_number(fields["m0"], "m0"),
+            af0_s=_number(fields["af0"], "af0"),
+            af1_s_s=_number(fields["af1"], "af1"),
+            iod=_integer(fields["iod"], "iod"),
+            t0a_s=_number(fields["t0a"], "t0a"),
+            wna_mod4=_integer(fields["wna"], "wna"),
+            status_e5a=_integer(fields["statusE5a"], "statusE5a"),
+            status_e5b=_integer(fields["statusE5b"], "statusE5b"),
+            status_e1b=_integer(fields["statusE1B"], "statusE1B"),
         )
         if not 1 <= record.svid <= 36:
             raise ValueError(f"Galileo GSC SVID out of range: {record.svid}")
@@ -208,8 +266,8 @@ def parse_galileo_gsc_almanac(
             raise ValueError(f"Galileo GSC eccentricity out of range for SVID {record.svid}")
         if record.sqrt_a_m_sqrt <= 0.0:
             raise ValueError(f"Galileo GSC sqrt(A) is non-positive for SVID {record.svid}")
-        if record.t0a_s < 0.0:
-            raise ValueError(f"Galileo GSC t0a is negative for SVID {record.svid}")
+        if not 0.0 <= record.t0a_s < 604800.0:
+            raise ValueError(f"Galileo GSC t0a is outside one GST week for SVID {record.svid}")
         if not 0 <= record.wna_mod4 <= 3:
             raise ValueError(f"Galileo GSC WNa modulo-4 is out of range for SVID {record.svid}")
         records.append(record)
@@ -225,6 +283,7 @@ def parse_galileo_gsc_almanac(
         source_filename=filename,
         source_sha256=hashlib.sha256(xml_text.encode("utf-8")).hexdigest(),
         records=tuple(records),
+        issue_date_utc=issue_date,
     )
 
 
@@ -251,9 +310,39 @@ def _fetch_text(url: str, timeout_s: float) -> str:
     return text
 
 
-def fetch_latest_galileo_gsc_almanac(*, timeout_s: float = 20.0) -> GalileoGscAlmanac:
-    index_html = _fetch_text(GSC_ALMANAC_INDEX_URL, timeout_s)
-    xml_url = discover_latest_gsc_almanac_url(index_html)
+def fetch_galileo_gsc_almanac_for_date(day: date, *, timeout_s: float = 20.0) -> GalileoGscAlmanac:
+    xml_url = gsc_daily_almanac_url(day)
     xml_text = _fetch_text(xml_url, timeout_s)
     filename = urlparse(xml_url).path.rsplit("/", 1)[-1]
     return parse_galileo_gsc_almanac(filename, xml_text, source_url=xml_url)
+
+
+def fetch_latest_galileo_gsc_almanac(
+    *,
+    timeout_s: float = 20.0,
+    as_of: date | None = None,
+    direct_lookback_days: int = 14,
+) -> GalileoGscAlmanac:
+    if direct_lookback_days < 0:
+        raise ValueError("direct_lookback_days must be non-negative")
+    anchor = as_of or datetime.now(UTC).date()
+    direct_errors: list[str] = []
+    for offset in range(direct_lookback_days + 1):
+        candidate_day = anchor - timedelta(days=offset)
+        try:
+            return fetch_galileo_gsc_almanac_for_date(candidate_day, timeout_s=timeout_s)
+        except ValueError as exc:
+            direct_errors.append(f"{candidate_day.isoformat()}: {exc}")
+
+    try:
+        index_html = _fetch_text(GSC_ALMANAC_INDEX_URL, timeout_s)
+        xml_url = discover_latest_gsc_almanac_url(index_html)
+        xml_text = _fetch_text(xml_url, timeout_s)
+        filename = urlparse(xml_url).path.rsplit("/", 1)[-1]
+        return parse_galileo_gsc_almanac(filename, xml_text, source_url=xml_url)
+    except ValueError as exc:
+        detail = "; ".join(direct_errors[-4:])
+        raise ValueError(
+            "Galileo GSC direct daily XML and product index are unavailable; "
+            f"recent_direct_attempts=[{detail}]; index={exc}"
+        ) from exc
