@@ -69,6 +69,10 @@ class GalileoGscAlmanacRecord:
         return GALILEO_REFERENCE_INCLINATION_RAD + self.delta_inclination_semicircles * pi
 
     @property
+    def delta_inclination_rad(self) -> float:
+        return self.delta_inclination_semicircles * pi
+
+    @property
     def raan_rad(self) -> float:
         return self.raan_semicircles * pi
 
@@ -84,6 +88,10 @@ class GalileoGscAlmanacRecord:
     def mean_anomaly_rad(self) -> float:
         return self.mean_anomaly_semicircles * pi
 
+    @property
+    def healthy(self) -> bool:
+        return self.status_e1b == 0 and self.status_e5a == 0 and self.status_e5b == 0
+
 
 @dataclass(frozen=True)
 class GalileoGscAlmanac:
@@ -91,6 +99,7 @@ class GalileoGscAlmanac:
     source_filename: str
     source_sha256: str
     records: tuple[GalileoGscAlmanacRecord, ...]
+    issue_date_utc: datetime | None = None
     authority_note: str = (
         "Official European GNSS Service Centre Galileo almanac XML; OS SIS ICD almanac semantics are preserved explicitly"
     )
@@ -166,10 +175,6 @@ def discover_latest_gsc_almanac_url(index_html: str) -> str:
 
 
 def _record_fields(element: ElementTree.Element) -> dict[str, str] | None:
-    # GSC has used both flat SV records and records where the orbital/status
-    # parameters are grouped below nested child elements. SVID remains the
-    # record discriminator, so only subtrees with a direct SVID child are
-    # candidates; required values may then be descendants of that same record.
     direct = {_local_name(child.tag): (child.text or "").strip() for child in list(element)}
     if "SVID" not in direct:
         return None
@@ -191,6 +196,26 @@ def _record_fields(element: ElementTree.Element) -> dict[str, str] | None:
     return fields
 
 
+def _issue_date_utc(root: ElementTree.Element) -> datetime | None:
+    values = [
+        (node.text or "").strip()
+        for node in root.iter()
+        if _local_name(node.tag) == "issueDate" and (node.text or "").strip()
+    ]
+    if not values:
+        return None
+    if len(set(values)) != 1:
+        raise ValueError("Galileo GSC XML contains conflicting issueDate values")
+    text = values[0]
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"invalid Galileo GSC issueDate: {text!r}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("Galileo GSC issueDate must include an explicit UTC offset")
+    return parsed.astimezone(UTC)
+
+
 def parse_galileo_gsc_almanac(
     filename: str,
     xml_text: str,
@@ -208,6 +233,7 @@ def parse_galileo_gsc_almanac(
     except ElementTree.ParseError as exc:
         raise ValueError("Galileo GSC XML is invalid") from exc
 
+    issue_date = _issue_date_utc(root)
     records: list[GalileoGscAlmanacRecord] = []
     for element in root.iter():
         fields = _record_fields(element)
@@ -240,8 +266,8 @@ def parse_galileo_gsc_almanac(
             raise ValueError(f"Galileo GSC eccentricity out of range for SVID {record.svid}")
         if record.sqrt_a_m_sqrt <= 0.0:
             raise ValueError(f"Galileo GSC sqrt(A) is non-positive for SVID {record.svid}")
-        if record.t0a_s < 0.0:
-            raise ValueError(f"Galileo GSC t0a is negative for SVID {record.svid}")
+        if not 0.0 <= record.t0a_s < 604800.0:
+            raise ValueError(f"Galileo GSC t0a is outside one GST week for SVID {record.svid}")
         if not 0 <= record.wna_mod4 <= 3:
             raise ValueError(f"Galileo GSC WNa modulo-4 is out of range for SVID {record.svid}")
         records.append(record)
@@ -257,6 +283,7 @@ def parse_galileo_gsc_almanac(
         source_filename=filename,
         source_sha256=hashlib.sha256(xml_text.encode("utf-8")).hexdigest(),
         records=tuple(records),
+        issue_date_utc=issue_date,
     )
 
 
