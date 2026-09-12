@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urlencode
 
 from constellation_control.adapters.fcnd_api import FcndApiClient
 from constellation_control.adapters.reviewed_http_fetch import fetch_reviewed_url
@@ -32,15 +32,8 @@ def _assert_galileo_nav(raw: bytes, source_name: str) -> None:
 def probe_iac(day) -> None:
     doy = day.timetuple().tm_yday
     yy = day.year % 100
-    directory = f"ftp://ftp.glonass-iac.ru/MCC/BRDC/{day.year:04d}/"
-    listing = fetch_reviewed_url(directory, timeout_s=60.0)
-    names = listing.raw.decode("utf-8", errors="replace").splitlines()
-    expected = f"Brdc{doy:03d}0.{yy:02d}l"
-    candidates = [name.strip() for name in names if name.strip().lower() in {expected.lower(), (expected + '.z').lower(), (expected + '.gz').lower()}]
-    if not candidates:
-        raise RuntimeError(f"IAC Galileo candidate missing: expected {expected}")
-    name = candidates[0]
-    url = urljoin(directory, name)
+    name = f"Brdc{doy:03d}0.{yy:02d}l"
+    url = f"ftp://ftp.glonass-iac.ru/MCC/BRDC/{day.year:04d}/{name}"
     response = fetch_reviewed_url(url, timeout_s=60.0)
     rinex = _decode_rinex_payload(response.raw, name)
     print("IAC_GALILEO_FIRST_LINES", json.dumps(_first_lines(rinex), ensure_ascii=False))
@@ -65,20 +58,35 @@ def probe_fcnd(day) -> None:
             if not name:
                 continue
             lower = name.lower()
-            if lower.endswith(f".{day.year % 100:02d}l") or lower.endswith(f".{day.year % 100:02d}l.z"):
+            if lower.endswith(f".{day.year % 100:02d}l") or lower.endswith(
+                f".{day.year % 100:02d}l.z"
+            ):
                 candidates.append((name, _fcnd_record_time(record, day)))
         print(f"FCND_GALILEO_COLLECTION collection={collection_id} candidates={len(candidates)}")
         for name, time_begin in candidates[:8]:
             payload = client.download_datafile(time_begin=time_begin, file_name=name)
             rinex = _decode_rinex_payload(payload, name)
-            print("FCND_GALILEO_FIRST_LINES", collection_id, name, json.dumps(_first_lines(rinex), ensure_ascii=False))
+            print(
+                "FCND_GALILEO_FIRST_LINES",
+                collection_id,
+                name,
+                json.dumps(_first_lines(rinex), ensure_ascii=False),
+            )
             try:
                 _assert_galileo_nav(rinex, name)
             except RuntimeError as exc:
                 print("FCND_GALILEO_REJECT", exc)
                 continue
-            query = urlencode([("datafile[time_begin]", time_begin), ("datafile[file_name]", name)])
-            print("FCND_GALILEO_RUNTIME_OK", collection_id, name, "https://fcnd.ru/api/getData/?" + query, len(rinex))
+            query = urlencode(
+                [("datafile[time_begin]", time_begin), ("datafile[file_name]", name)]
+            )
+            print(
+                "FCND_GALILEO_RUNTIME_OK",
+                collection_id,
+                name,
+                "https://fcnd.ru/api/getData/?" + query,
+                len(rinex),
+            )
             return
     raise RuntimeError("FCND returned no qualified Galileo broadcast-navigation candidate")
 
