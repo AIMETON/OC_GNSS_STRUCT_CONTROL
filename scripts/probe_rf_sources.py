@@ -61,11 +61,18 @@ def print_json_probe(label: str, url: str, *, inspect_contract: bool = False) ->
             print(f"list_len={len(payload)} sample={payload[:2]!r}")
         if inspect_contract:
             print("shape=", json.dumps(_shape(payload), ensure_ascii=False)[:12000])
-            pattern = re.compile(r"gnss|rinex|nav|orbit|ephem|альман|эфем", re.IGNORECASE)
+            pattern = re.compile(r"gnss|rinex|nav|orbit|ephem|broadcast|альман|эфем|навигац", re.IGNORECASE)
             matches = _matching_strings(payload, pattern)
             print(f"contract_matches={len(matches)}")
-            for match in matches[:160]:
+            for match in matches[:200]:
                 print(match)
+            if isinstance(payload, dict):
+                collections = payload.get("answer", {}).get("t_meta_collection", {}).get("Fields", [])
+                print("candidate_meta_collections:")
+                for item in collections:
+                    text = json.dumps(item, ensure_ascii=False)
+                    if re.search(r"broadcast|navigation|навигац|эфемер|almanac|альманах", text, re.IGNORECASE):
+                        print(json.dumps(item, ensure_ascii=False)[:5000])
     except Exception as exc:  # noqa: BLE001 - diagnostic probe must continue
         print(f"ERROR {type(exc).__name__}: {exc}")
 
@@ -92,7 +99,7 @@ def curl_ftp(label: str, url: str) -> list[str]:
     lines = completed.stdout.splitlines() if completed.stdout else []
     if lines:
         print(f"lines={len(lines)}")
-        for line in lines[:160]:
+        for line in lines[:200]:
             print(line)
     if completed.stderr:
         print("stderr:", completed.stderr[:2000])
@@ -132,22 +139,19 @@ def main() -> None:
         fcnd_catalogue_url(begin, end, data_type="gnss"),
         inspect_contract=True,
     )
-    print_json_probe(
-        "FCND documentation example",
-        fcnd_catalogue_url("28-03-2022 00:00:00", "28-03-2022 23:59:59", data_type="gnss", org=1),
-        inspect_contract=True,
-    )
-
-    curl_ftp("IAC FTP root", "ftp://ftp.glonass-iac.ru/")
-    curl_ftp("IAC FTP MCC", "ftp://ftp.glonass-iac.ru/MCC/")
-    curl_ftp("IAC FTP MCC/BRDC", "ftp://ftp.glonass-iac.ru/MCC/BRDC/")
-    curl_ftp("IAC FTP MCC/ALMANAC", "ftp://ftp.glonass-iac.ru/MCC/ALMANAC/")
-    curl_ftp("IAC FTP IGS", "ftp://ftp.glonass-iac.ru/IGS/")
-    curl_ftp("IAC FTP IGS/BRDC", "ftp://ftp.glonass-iac.ru/IGS/BRDC/")
 
     year = day.year
     doy = day.timetuple().tm_yday
     yy = year % 100
+    curl_ftp("IAC FTP root", "ftp://ftp.glonass-iac.ru/")
+    curl_ftp("IAC FTP MCC", "ftp://ftp.glonass-iac.ru/MCC/")
+    curl_ftp("IAC FTP MCC/BRDC", "ftp://ftp.glonass-iac.ru/MCC/BRDC/")
+    curl_ftp("IAC FTP MCC/BRDC current year", f"ftp://ftp.glonass-iac.ru/MCC/BRDC/{year:04d}/")
+    curl_ftp("IAC FTP MCC/ALMANAC", "ftp://ftp.glonass-iac.ru/MCC/ALMANAC/")
+    curl_ftp("IAC FTP MCC/ALMANAC current year", f"ftp://ftp.glonass-iac.ru/MCC/ALMANAC/{year:04d}/")
+    curl_ftp("IAC FTP IGS", "ftp://ftp.glonass-iac.ru/IGS/")
+    curl_ftp("IAC FTP IGS/BRDC", "ftp://ftp.glonass-iac.ru/IGS/BRDC/")
+
     whu_root = f"ftp://igs.gnsswhu.cn/pub/gps/data/daily/{year:04d}/{doy:03d}/"
     curl_ftp("WHU day root", whu_root)
     for suffix in ("g", "n", "m", "p"):
