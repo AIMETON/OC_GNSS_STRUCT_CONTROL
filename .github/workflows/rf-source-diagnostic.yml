@@ -1,0 +1,28 @@
+name: rf-source-diagnostic
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Probe source contracts
+        run: python scripts/probe_rf_sources.py
+      - name: Probe FCND navigation collections
+        run: python scripts/probe_fcnd_nav.py
+      - name: Install packaged runtime
+        run: python -m pip install -e '.[dev]'
+      - name: Execute GLONASS source adapters
+        run: python scripts/probe_rf_source_runtime.py
+      - name: Qualify RF Galileo broadcast sources
+        run: python scripts/probe_rf_galileo.py

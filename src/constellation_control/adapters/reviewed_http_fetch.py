@@ -4,6 +4,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 _BROWSER_HEADERS = {
@@ -25,30 +26,12 @@ class ReviewedHttpResponse:
     transport: str
 
 
-def fetch_reviewed_url(url: str, *, timeout_s: float = 20.0) -> ReviewedHttpResponse:
-    """Fetch a caller-reviewed URL with a browser-compatible primary path and curl fallback.
-
-    Callers remain responsible for strict host/path allowlisting before invoking this helper.
-    The curl fallback is useful on Windows/corporate networks where Python urllib and the
-    system browser can traverse different TLS/proxy paths.
-    """
-
-    request = Request(url, headers=_BROWSER_HEADERS)
-    urllib_error: Exception | None = None
-    try:
-        with urlopen(request, timeout=timeout_s) as response:  # noqa: S310 - caller performs allowlist validation
-            return ReviewedHttpResponse(
-                raw=response.read(),
-                content_type=response.headers.get("Content-Type", ""),
-                transport="urllib",
-            )
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
-        urllib_error = exc
-
+def _curl_fetch(url: str, *, connect_timeout_s: float, transfer_timeout_s: float) -> ReviewedHttpResponse:
     curl = shutil.which("curl") or shutil.which("curl.exe")
     if curl is None:
-        raise OSError(f"HTTP fetch failed via urllib and curl is unavailable: {urllib_error}") from urllib_error
+        raise OSError("curl/curl.exe is unavailable")
 
+    scheme = urlsplit(url).scheme.lower()
     command = [
         curl,
         "--fail-with-body",
@@ -56,29 +39,115 @@ def fetch_reviewed_url(url: str, *, timeout_s: float = 20.0) -> ReviewedHttpResp
         "--silent",
         "--show-error",
         "--connect-timeout",
-        str(max(1, int(timeout_s))),
+        str(max(1, int(connect_timeout_s))),
         "--max-time",
-        str(max(2, int(timeout_s) + 5)),
-        "--user-agent",
-        _BROWSER_HEADERS["User-Agent"],
-        "--header",
-        "Accept: text/plain,application/xml,text/xml,text/html;q=0.9,*/*;q=0.8",
-        url,
+        str(max(2, int(transfer_timeout_s))),
     ]
+    if scheme == "ftp":
+        # Field-qualified path: anonymous passive FTP to Wuhan IGS works on target Windows.
+        # Keep transfer timeout much larger than connect timeout: the archive can be slow
+        # while remaining healthy, and a 1-2 MiB BRDC file may need several minutes.
+        command.extend(["--ftp-pasv", "--disable-epsv"])
+    else:
+        command.extend(
+            [
+                "--user-agent",
+                _BROWSER_HEADERS["User-Agent"],
+                "--header",
+                "Accept: text/plain,application/xml,text/xml,text/html;q=0.9,*/*;q=0.8",
+            ]
+        )
+    command.append(url)
+
     try:
         completed = subprocess.run(  # noqa: S603 - executable and URL are caller-reviewed, shell=False
             command,
             check=False,
             capture_output=True,
-            timeout=timeout_s + 10.0,
+            timeout=transfer_timeout_s + 15.0,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise OSError(f"HTTP fetch failed via urllib ({urllib_error}) and curl ({exc})") from exc
+        raise OSError(f"curl transport failed: {exc}") from exc
 
     if completed.returncode != 0:
         stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise OSError(f"curl_exit={completed.returncode}; curl={stderr or 'no stderr'}")
+    return ReviewedHttpResponse(raw=completed.stdout, content_type="", transport=f"curl-{scheme or 'url'}")
+
+
+def fetch_reviewed_url(
+    url: str,
+    *,
+    timeout_s: float = 20.0,
+    transfer_timeout_s: float | None = None,
+) -> ReviewedHttpResponse:
+    """Fetch a caller-reviewed URL through protocol-aware Windows-friendly transports.
+
+    ``timeout_s`` is the connection/read timeout for the primary attempt. Large/slow FTP
+    payloads receive a substantially longer transfer budget so a healthy Wuhan download
+    is not rejected merely because throughput is low. Callers remain responsible for
+    strict host/path allowlisting and payload validation.
+    """
+
+    if timeout_s <= 0.0:
+        raise ValueError("timeout_s must be positive")
+    scheme = urlsplit(url).scheme.lower()
+    if scheme not in {"http", "https", "ftp"}:
+        raise ValueError(f"unsupported reviewed URL scheme: {scheme or '<missing>'}")
+
+    if transfer_timeout_s is None:
+        transfer_timeout_s = max(timeout_s + 5.0, 300.0 if scheme == "ftp" else timeout_s + 5.0)
+    if transfer_timeout_s <= 0.0:
+        raise ValueError("transfer_timeout_s must be positive")
+
+    # For FTP prefer the exact transport already field-qualified on target Windows:
+    # system curl/curl.exe in passive mode. urllib remains a fallback only.
+    if scheme == "ftp":
+        curl_error: Exception | None = None
+        try:
+            return _curl_fetch(
+                url,
+                connect_timeout_s=timeout_s,
+                transfer_timeout_s=transfer_timeout_s,
+            )
+        except OSError as exc:
+            curl_error = exc
+
+        ftp_urllib_error: Exception | None = None
+        try:
+            with urlopen(url, timeout=max(timeout_s, 60.0)) as response:  # noqa: S310 - caller allowlists URL
+                return ReviewedHttpResponse(
+                    raw=response.read(),
+                    content_type=response.headers.get("Content-Type", ""),
+                    transport="urllib-ftp",
+                )
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            ftp_urllib_error = exc
+        raise OSError(
+            "FTP fetch failed via both transports; "
+            f"curl={curl_error}; urllib={ftp_urllib_error}"
+        ) from ftp_urllib_error
+
+    request = Request(url, headers=_BROWSER_HEADERS)
+    http_urllib_error: Exception | None = None
+    try:
+        with urlopen(request, timeout=timeout_s) as response:  # noqa: S310 - caller performs allowlist validation
+            return ReviewedHttpResponse(
+                raw=response.read(),
+                content_type=response.headers.get("Content-Type", ""),
+                transport="urllib-http",
+            )
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        http_urllib_error = exc
+
+    try:
+        return _curl_fetch(
+            url,
+            connect_timeout_s=timeout_s,
+            transfer_timeout_s=transfer_timeout_s,
+        )
+    except OSError as curl_error:
         raise OSError(
             "HTTP fetch failed via both transports; "
-            f"urllib={urllib_error}; curl_exit={completed.returncode}; curl={stderr or 'no stderr'}"
-        ) from urllib_error
-    return ReviewedHttpResponse(raw=completed.stdout, content_type="", transport="curl")
+            f"urllib={http_urllib_error}; curl={curl_error}"
+        ) from http_urllib_error

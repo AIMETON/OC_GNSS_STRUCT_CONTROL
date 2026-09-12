@@ -80,7 +80,7 @@ def test_offline_text_accepts_tsv_and_semicolon_tables() -> None:
     assert semi.rows[0] == ("C01", "27800")
 
 
-def test_preview_exposes_iac_card_and_all_fixed_sources() -> None:
+def test_preview_exposes_iac_card_and_all_qualified_data_sources() -> None:
     page = render_preview_page_for_test()
     assert 'id="iacGnssCard"' in page
     assert "/api/iac-gnss/online/" in page
@@ -89,7 +89,7 @@ def test_preview_exposes_iac_card_and_all_fixed_sources() -> None:
     client = TestClient(create_preview_app())
     response = client.get("/api/iac-gnss/sources")
     assert response.status_code == 200
-    assert response.json() == {dataset.value: url for dataset, url in IAC_URLS.items()}
+    assert response.json() == {dataset.value: url for dataset, url in IAC_DATA_URLS.items()}
 
 
 def test_offline_preview_preserves_source_hash_and_blocks_promotion() -> None:

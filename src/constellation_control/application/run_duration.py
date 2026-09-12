@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -22,6 +23,27 @@ class DurationRunResult:
     output_step_s: float
     predicted_sample_count: int
     preset: str
+
+
+def _run_has_relative_pairs(run_dir: Path) -> bool:
+    """Return whether the completed run contains pairwise relative-operation evidence.
+
+    A real constellation baseline may legitimately contain only reference spacecraft.
+    In that case ``timeseries.csv`` is empty by design and the pairwise Kepler drift
+    auditor is not applicable. Do not turn a successful authoritative propagation into
+    a failed Preview job merely because there is no additional/reference pair to audit.
+    """
+
+    summary_path = run_dir / "summary.json"
+    if not summary_path.is_file():
+        return False
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("run summary must be a JSON object")
+    relative_operations = payload.get("relative_operations", [])
+    if not isinstance(relative_operations, list):
+        raise ValueError("run summary relative_operations must be a list")
+    return bool(relative_operations)
 
 
 def run_scenario_with_duration(
@@ -58,7 +80,7 @@ def run_scenario_with_duration(
             )
             run_dir = run_scenario(effective_path, output_root)
 
-    if (run_dir / "summary.json").exists():
+    if _run_has_relative_pairs(run_dir):
         enrich_run_with_kepler_drift_audit(run_dir)
     return DurationRunResult(
         run_dir=run_dir,

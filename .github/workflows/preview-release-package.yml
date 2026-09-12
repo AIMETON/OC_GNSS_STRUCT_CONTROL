@@ -12,6 +12,10 @@ on:
       - '.github/workflows/preview-release-package.yml'
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -175,8 +179,8 @@ jobs:
           bundled_version="$(unzip -p "$BUNDLE_NAME.zip" "$BUNDLE_NAME/src/constellation_control/version.py" | python -c "import sys; ns={}; exec(sys.stdin.read(), ns); print(ns['__version__'])")"
           test "$bundled_version" = "$PREVIEW_VERSION"
           unzip -p "$BUNDLE_NAME.zip" "$BUNDLE_NAME/src/constellation_control/preview/operator_tabs.py" | grep 'Active Run Configuration'
-          unzip -p "$BUNDLE_NAME.zip" "$BUNDLE_NAME/src/constellation_control/preview/operator_tabs.py" | grep 'data-tab="design"'
-          unzip -p "$BUNDLE_NAME.zip" "$BUNDLE_NAME/src/constellation_control/preview/operator_tabs.py" | grep 'data-tab="robustness"'
+          unzip -p "$BUNDLE_NAME.zip" "$BUNDLE_NAME/src/constellation_control/preview/operator_tabs.py" | grep 'data-tab="mission"'
+          unzip -p "$BUNDLE_NAME.zip" "$BUNDLE_NAME/src/constellation_control/preview/operator_tabs.py" | grep 'data-tab="experiments"'
           if unzip -l "$BUNDLE_NAME.zip" | grep -q "$BUNDLE_NAME/src/constellation_control/preview/app.py"; then
             echo 'legacy preview/app.py must not ship' >&2
             exit 1
