@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
 from html.parser import HTMLParser
 from math import pi, radians, sqrt
 from urllib.parse import urljoin, urlparse
@@ -12,6 +13,7 @@ from constellation_control.adapters.reviewed_http_fetch import fetch_reviewed_ur
 
 GSC_ALMANAC_INDEX_URL = "https://www.gsc-europa.eu/gsc-products/almanac"
 GSC_FILE_PREFIX = "https://www.gsc-europa.eu/sites/default/files/"
+GSC_DAILY_FILE_PREFIX = "https://www.gsc-europa.eu/sites/default/files/sites/all/files/"
 GALILEO_NOMINAL_SEMI_MAJOR_AXIS_M = 29_600_000.0
 GALILEO_REFERENCE_INCLINATION_RAD = radians(56.0)
 
@@ -136,6 +138,10 @@ def _candidate_sort_key(url: str) -> tuple[int, str]:
     return 0, ""
 
 
+def gsc_daily_almanac_url(day: date) -> str:
+    return f"{GSC_DAILY_FILE_PREFIX}{day.isoformat()}.xml"
+
+
 def discover_latest_gsc_almanac_url(index_html: str) -> str:
     parser = _LinkParser()
     parser.feed(index_html)
@@ -251,9 +257,39 @@ def _fetch_text(url: str, timeout_s: float) -> str:
     return text
 
 
-def fetch_latest_galileo_gsc_almanac(*, timeout_s: float = 20.0) -> GalileoGscAlmanac:
-    index_html = _fetch_text(GSC_ALMANAC_INDEX_URL, timeout_s)
-    xml_url = discover_latest_gsc_almanac_url(index_html)
+def fetch_galileo_gsc_almanac_for_date(day: date, *, timeout_s: float = 20.0) -> GalileoGscAlmanac:
+    xml_url = gsc_daily_almanac_url(day)
     xml_text = _fetch_text(xml_url, timeout_s)
     filename = urlparse(xml_url).path.rsplit("/", 1)[-1]
     return parse_galileo_gsc_almanac(filename, xml_text, source_url=xml_url)
+
+
+def fetch_latest_galileo_gsc_almanac(
+    *,
+    timeout_s: float = 20.0,
+    as_of: date | None = None,
+    direct_lookback_days: int = 14,
+) -> GalileoGscAlmanac:
+    if direct_lookback_days < 0:
+        raise ValueError("direct_lookback_days must be non-negative")
+    anchor = as_of or datetime.now(UTC).date()
+    direct_errors: list[str] = []
+    for offset in range(direct_lookback_days + 1):
+        candidate_day = anchor - timedelta(days=offset)
+        try:
+            return fetch_galileo_gsc_almanac_for_date(candidate_day, timeout_s=timeout_s)
+        except ValueError as exc:
+            direct_errors.append(f"{candidate_day.isoformat()}: {exc}")
+
+    try:
+        index_html = _fetch_text(GSC_ALMANAC_INDEX_URL, timeout_s)
+        xml_url = discover_latest_gsc_almanac_url(index_html)
+        xml_text = _fetch_text(xml_url, timeout_s)
+        filename = urlparse(xml_url).path.rsplit("/", 1)[-1]
+        return parse_galileo_gsc_almanac(filename, xml_text, source_url=xml_url)
+    except ValueError as exc:
+        detail = "; ".join(direct_errors[-4:])
+        raise ValueError(
+            "Galileo GSC direct daily XML and product index are unavailable; "
+            f"recent_direct_attempts=[{detail}]; index={exc}"
+        ) from exc
