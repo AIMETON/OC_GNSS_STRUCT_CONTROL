@@ -117,8 +117,8 @@ def test_low_level_source_cards_route_only_supported_adapters_to_expert() -> Non
     page = render_preview_page_for_test()
     assert "glonassRinexRunnerCard" in page
     assert "iacGlonassRunnerCard" in page
-    assert "navcenGpsRunnerCard" not in page
-    assert "mixedGnssRunnerCard" not in page
+    assert "NAVCEN GPS YUMA/SEM → runnable scenario" not in page
+    assert "ГЛОНАСС ИАЦ + GPS NAVCEN → полная runnable группировка" not in page
     assert "/api/navcen-gps-runner/" not in page
     assert "/api/mixed-gnss-runner/" not in page
 
