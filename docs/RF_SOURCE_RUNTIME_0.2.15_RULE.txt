@@ -1,1 +1,0 @@
-Executed source qualification rule: configuration presence, reachability and GREEN unit tests do not make a source operational. The same packaged runtime adapter must fetch and validate the requested product before field release.
