@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
+import json
 from datetime import date
 from pathlib import Path
 
@@ -151,6 +154,77 @@ def test_unix_compress_payload_is_decoded_as_ascii(monkeypatch) -> None:
     expected = _rinex2_glonass(date(2026, 9, 11))
     monkeypatch.setattr(source_runtime.unlzw3, "unlzw", lambda payload: expected.decode("ascii"))
     assert source_runtime._decode_rinex_payload(b"\x1f\x9dplaceholder", "zeck2540.26g.Z") == expected
+
+
+def test_external_cache_gzip_is_deterministic_for_uncompressed_source(tmp_path: Path) -> None:
+    day = date(2026, 8, 1)
+    rinex = _rinex2_glonass(day)
+    first = source_runtime._store_external_rinex(
+        provider_key="iac-ftp",
+        provider="IAC",
+        source_url="ftp://example.test/Brdc2130.26g",
+        source_file_name="Brdc2130.26g",
+        source_payload=rinex,
+        rinex=rinex,
+        source_date=day,
+        system="GLONASS",
+        transport="test",
+        cache_root=tmp_path,
+    )
+    expected_gzip = gzip.compress(rinex, mtime=0)
+    assert first.gzip_path.read_bytes() == expected_gzip
+
+    second = source_runtime._store_external_rinex(
+        provider_key="iac-ftp",
+        provider="IAC",
+        source_url="ftp://example.test/Brdc2130.26g",
+        source_file_name="Brdc2130.26g",
+        source_payload=rinex,
+        rinex=rinex,
+        source_date=day,
+        system="GLONASS",
+        transport="test",
+        cache_root=tmp_path,
+    )
+    assert second.gzip_path.read_bytes() == expected_gzip
+
+
+def test_external_cache_accepts_0_2_15_gzip_mtime_when_rinex_matches(tmp_path: Path) -> None:
+    day = date(2026, 8, 1)
+    rinex = _rinex2_glonass(day)
+    directory = tmp_path / "iac-ftp" / "brdc" / "2026" / "213"
+    directory.mkdir(parents=True)
+    gzip_path = directory / "Brdc2130.26g.gz"
+    rinex_path = directory / "Brdc2130.26g"
+    manifest_path = directory / "Brdc2130.26g.gz.manifest.json"
+    legacy_gzip = gzip.compress(rinex, mtime=1_725_000_000)
+    gzip_path.write_bytes(legacy_gzip)
+    rinex_path.write_bytes(rinex)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "source_sha256": hashlib.sha256(rinex).hexdigest(),
+                "rinex_sha256": hashlib.sha256(rinex).hexdigest(),
+                "cached_gzip_sha256": hashlib.sha256(legacy_gzip).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cached = source_runtime._store_external_rinex(
+        provider_key="iac-ftp",
+        provider="IAC",
+        source_url="ftp://example.test/Brdc2130.26g",
+        source_file_name="Brdc2130.26g",
+        source_payload=rinex,
+        rinex=rinex,
+        source_date=day,
+        system="GLONASS",
+        transport="test",
+        cache_root=tmp_path,
+    )
+    assert cached.gzip_path.read_bytes() == legacy_gzip
+    assert cached.rinex_path.read_bytes() == rinex
 
 
 def test_iac_mcc_brdc_selects_exact_glonass_daily_file(tmp_path: Path, monkeypatch) -> None:
