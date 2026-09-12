@@ -5,7 +5,7 @@ from pathlib import Path
 from constellation_control.adapters.gnss_almanac import GnssAlmanacFormat
 from constellation_control.adapters.orekit.mean_conversion import MeanConversionResult
 from constellation_control.application.run import load_scenario
-from constellation_control.domain.models import MeanOrbit, MeanOrbitDefinition
+from constellation_control.domain.models import MeanElementDefinition, MeanOrbit
 from constellation_control.preview import gnss_almanac_input
 from constellation_control.preview.gnss_almanac_input import (
     GNSS_ALMANAC_CARD,
@@ -61,7 +61,7 @@ def _fake_convert(self, **kwargs) -> MeanConversionResult:
             ix=0.2,
             iy=0.0,
             lambda_rad=0.1 * prn,
-            definition=MeanOrbitDefinition(
+            definition=MeanElementDefinition(
                 theory="orekit-dsst",
                 force_model_fingerprint=kwargs["force_model"].fingerprint(),
             ),
@@ -98,7 +98,7 @@ def test_all_gps_almanac_records_replace_template_constellation(tmp_path: Path, 
     assert result["satellite_count"] == 2
     assert [sat.satellite_id for sat in child.constellation.satellites] == ["GPS-01", "GPS-02"]
     assert all(sat.plane_id == "ALMANAC-UNASSIGNED" for sat in child.constellation.satellites)
-    assert all(sat.role.value == "reference" for sat in child.constellation.satellites)
+    assert all(sat.role == "reference" for sat in child.constellation.satellites)
     assert child.maneuvers == ()
     assert child.digital_twin is not None
     assert child.digital_twin.lineage is not None
