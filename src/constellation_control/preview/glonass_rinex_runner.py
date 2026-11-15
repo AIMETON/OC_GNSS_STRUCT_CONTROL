@@ -39,6 +39,36 @@ def _target(root: Path, name: str) -> Path:
     return target
 
 
+def _orekit_safe_rinex_text(path: Path) -> str:
+    """Return parser-safe ASCII while preserving source byte-column geometry.
+
+    Some reviewed providers place UTF-8/legacy national characters in RINEX header
+    comments/agency metadata. RINEX navigation records themselves remain ASCII and
+    fixed-column. Replace only high-bit header bytes with spaces (one byte -> one
+    space), preserving every column position. Non-ASCII bytes after END OF HEADER
+    are rejected fail-closed because changing navigation records would alter data.
+    """
+
+    raw = path.read_bytes()
+    marker = raw.find(b"END OF HEADER")
+    if marker < 0:
+        raise ValueError(f"{path.name}: RINEX header has no END OF HEADER marker")
+    newline = raw.find(b"\n", marker)
+    header_end = len(raw) if newline < 0 else newline + 1
+    header = raw[:header_end]
+    body = raw[header_end:]
+    try:
+        body_text = body.decode("ascii", errors="strict")
+    except UnicodeDecodeError as exc:
+        absolute_offset = header_end + exc.start
+        raise ValueError(
+            f"{path.name}: non-ASCII byte in RINEX navigation records at byte {absolute_offset}; "
+            "only non-ASCII header metadata may be sanitized"
+        ) from exc
+    safe_header = bytes(value if value < 0x80 else 0x20 for value in header)
+    return safe_header.decode("ascii", errors="strict") + body_text
+
+
 def _validated_target_epoch(request: GlonassRinexRunnerRequest) -> datetime:
     target_epoch = request.target_epoch
     if target_epoch.tzinfo is None or target_epoch.utcoffset() is None:
@@ -96,7 +126,7 @@ def build_glonass_rinex_scenario(root: Path, request: GlonassRinexRunnerRequest)
         root.parent / "data" / "cache" / "rinex",
     )
     cached = selected.cached
-    rinex_text = cached.rinex_path.read_text(encoding="ascii", errors="strict")
+    rinex_text = _orekit_safe_rinex_text(cached.rinex_path)
     result = OrekitRinexGlonassMeanConversionClient(source.orekit_sidecar_url).convert(
         source_name=cached.source_url,
         source_text=rinex_text,
